@@ -1,0 +1,87 @@
+name: 🪄 XServer自动签到
+
+on:
+  repository_dispatch:
+    types: [XServer]          # Webhook 触发关键词：XServer
+  workflow_dispatch:        # 保留手动点击触发按钮
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 缓存依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/ms-playwright
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install chromium
+
+      - name: 设置代理隧道 (Gost)
+        env:
+          PROXY_STR: ${{ secrets.PROXY_SERVER }}
+        run: |
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          chmod +x gost-linux-amd64-2.11.5
+          nohup ./gost-linux-amd64-2.11.5 -L :1080 -F "$PROXY_STR" > gost.log 2>&1 &
+          sleep 5
+          cat gost.log || true
+
+      - name: 🎲 定时任务基础上随机延迟（0-119秒）
+        run: |
+          delay=$((RANDOM % 120))
+          echo "Random delay: ${delay}s"
+          sleep $delay
+
+      - name: 运行脚本
+        env:
+          XSERVER_EMAIL: ${{ secrets.XSERVER_EMAIL }}
+          XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROXY_SERVER: socks5://127.0.0.1:1080
+          PANEL_URL: ${{ secrets.PANEL_URL }}        # 新增
+          SERVER_NAME: ${{ secrets.SERVER_NAME }} 
+        run: python renew.py
+
+      # ⏱️ 提交 time.txt 到仓库(用于解决60天无文件变化的限制)
+      - name: Commit time.txt to repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f time.txt ]; then
+            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          else
+            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
+          fi
+
+          git add time.txt
+
+          if git diff --cached --quiet; then
+            echo "无变化，无需提交"
+          else
+            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
+            git push origin HEAD:main
+          fi

@@ -26,7 +26,7 @@ from playwright_stealth import stealth_async
 # 浏览器配置
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS") == "true"
 USE_HEADLESS = IS_GITHUB_ACTIONS or os.getenv("USE_HEADLESS", "false").lower() == "true"
-WAIT_TIMEOUT = 30000     # 页面元素等待超时时间(毫秒)
+WAIT_TIMEOUT = 10000     # 页面元素等待超时时间(毫秒)
 PAGE_LOAD_DELAY = 3      # 页面加载延迟时间(秒)
 
 # 代理配置 - 可选，不填则不使用代理
@@ -549,27 +549,41 @@ class XServerAutoLogin:
             print(f"❌ 验证升级页面失败: {e}")
     
     async def check_extension_restriction(self):
-        """检查期限延长限制信息"""
+        """检查期限延长限制信息 (智能识别新旧版提示)"""
         try:
             print("🔍 正在检测期限延长限制提示...")
+            await asyncio.sleep(2)  # 给页面一点点渲染时间
             
-            restriction_selector = "text=/残り契約時間が24時間を切るまで、期限の延長は行えません/"
+            # 1. 获取整个页面的文本内容
+            body_text = await self.page.locator("body").inner_text()
             
-            try:
-                element = await self.page.wait_for_selector(restriction_selector, timeout=5000)
-                restriction_text = await element.text_content()
-                print(f"✅ 找到期限延长限制信息")
-                print(f"🔍 限制信息: {restriction_text}")
+            # 2. 匹配新版提示：更新をご希望の場合は、xxxx以降にお試しください。
+            match = re.search(r"更新をご希望の場合は、(.+?)以降にお試しください。", body_text)
+            
+            if match and match.group(1):
+                next_time = match.group(1).strip()
+                print("✅ 成功匹配到新版期限延长限制信息！")
+                print(f"📋 下次可续期时间为: {next_time}")
+                
+                # 【核心巧妙处】把这个时间塞进旧到期时间变量里，这样你的 Telegram 和 Markdown 报告就能完美显示它！
+                self.old_expiry_time = f"未到期 (下次续期开放时间: {next_time})"
                 self.renewal_status = "Unexpired"
                 return True
                 
-            except Exception:
-                print("ℹ️ 未找到期限延长限制信息,可以进行延长操作")
+            # 3. 兼容旧版提示（保留原有的兜底逻辑）
+            elif "残り契約時間が24時間を切るまで" in body_text:
+                print("✅ 匹配到旧版期限延长限制信息（未满24小时）")
+                self.renewal_status = "Unexpired"
+                return True
+                
+            else:
+                print("ℹ️ 未找到任何期限延长限制信息，说明已经开放续期，准备进行延长操作...")
                 await self.perform_extension_operation()
                 return False
                 
         except Exception as e:
             print(f"❌ 检测期限延长限制失败: {e}")
+            # 发生异常时，保守起见返回 True（当做未到期处理），防止脚本因报错直接中断崩溃
             return True
     
     # =================================================================
@@ -585,43 +599,21 @@ class XServerAutoLogin:
             print(f"❌ 执行期限延长操作失败: {e}")
     
     async def click_extension_button(self):
-        """点击期限延长按钮 - 侦察调试版"""
+        """点击期限延长按钮 (优化选择器版)"""
         try:
-            print("🔍 正在查找续期按钮 (进入侦察模式)...")
+            print("🔍 正在查找'期限を延長する'按钮...")
             
-            # 1. 打印页面上所有按钮和链接的文字
-            print("=== 🚨 页面元素扫描开始 (请注意看这里) ===")
-            elements = await self.page.locator("a, button, input[type='submit'], input[type='button']").all()
-            for el in elements:
-                tag_name = await el.evaluate("el => el.tagName.toLowerCase()")
-                if tag_name == "input":
-                    text = await el.get_attribute("value")
-                else:
-                    text = await el.inner_text()
-                
-                if text and text.strip():
-                    # 过滤掉太长的无关文本，只打印短小精悍的按钮文字
-                    if len(text.strip()) < 30:
-                        print(f"发现按钮 [{tag_name}]: {text.strip()}")
-            print("=== 🚨 页面元素扫描结束 ===")
-
-            # 2. 截取案发现场并发送到 Telegram
-            try:
-                print("📸 正在截图并发送到 Telegram...")
-                error_img = "debug_extension_page.png"
-                await self.page.screenshot(path=error_img, full_page=True)
-                self.telegram.send_photo(error_img, caption="👀 找不到续期按钮，这是当前页面的截图，快帮我看看点哪个！")
-                print("✅ 截图发送成功，请去 TG 查收！")
-            except Exception as img_e:
-                print(f"⚠️ 截图发送失败: {img_e}")
-
-            # 3. 继续尝试原来的点击（预期会失败，但上面的情报已经拿到了）
+            # 将原本的 "a:has-text(...)" 改为 "text=..."，不管它是超链接还是按钮都能点中
             extension_selector = "text='期限を延長する'"
-            await self.page.wait_for_selector(extension_selector, timeout=15000)
+            await self.page.wait_for_selector(extension_selector, timeout=self.wait_timeout)
+            print("✅ 找到'期限を延長する'按钮")
+            
             await self.page.click(extension_selector)
+            print("✅ 已点击'期限を延長する'按钮")
             
             print("⏰ 等待页面跳转...")
             await asyncio.sleep(5)
+            
             await self.verify_extension_input_page()
             return True
             

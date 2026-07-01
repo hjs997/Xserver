@@ -2,8 +2,8 @@ name: 🪄 XServer自动签到
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # UTC 08:00 = 北京时间 16:00
-  workflow_dispatch:        # 保留手动点击触发按钮
+    - cron: '0 1 */2 * *'  # Runs every 48 hours at 00:00 UTC
+  workflow_dispatch: 
 
 jobs:
   run:

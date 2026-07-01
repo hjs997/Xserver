@@ -585,20 +585,43 @@ class XServerAutoLogin:
             print(f"❌ 执行期限延长操作失败: {e}")
     
     async def click_extension_button(self):
-        """点击期限延长按钮"""
+        """点击期限延长按钮 - 侦察调试版"""
         try:
-            print("🔍 正在查找'期限を延長する'按钮...")
+            print("🔍 正在查找续期按钮 (进入侦察模式)...")
             
+            # 1. 打印页面上所有按钮和链接的文字
+            print("=== 🚨 页面元素扫描开始 (请注意看这里) ===")
+            elements = await self.page.locator("a, button, input[type='submit'], input[type='button']").all()
+            for el in elements:
+                tag_name = await el.evaluate("el => el.tagName.toLowerCase()")
+                if tag_name == "input":
+                    text = await el.get_attribute("value")
+                else:
+                    text = await el.inner_text()
+                
+                if text and text.strip():
+                    # 过滤掉太长的无关文本，只打印短小精悍的按钮文字
+                    if len(text.strip()) < 30:
+                        print(f"发现按钮 [{tag_name}]: {text.strip()}")
+            print("=== 🚨 页面元素扫描结束 ===")
+
+            # 2. 截取案发现场并发送到 Telegram
+            try:
+                print("📸 正在截图并发送到 Telegram...")
+                error_img = "debug_extension_page.png"
+                await self.page.screenshot(path=error_img, full_page=True)
+                self.telegram.send_photo(error_img, caption="👀 找不到续期按钮，这是当前页面的截图，快帮我看看点哪个！")
+                print("✅ 截图发送成功，请去 TG 查收！")
+            except Exception as img_e:
+                print(f"⚠️ 截图发送失败: {img_e}")
+
+            # 3. 继续尝试原来的点击（预期会失败，但上面的情报已经拿到了）
             extension_selector = "text='期限を延長する'"
-            await self.page.wait_for_selector(extension_selector, timeout=self.wait_timeout)
-            print("✅ 找到'期限を延長する'按钮")
-            
+            await self.page.wait_for_selector(extension_selector, timeout=15000)
             await self.page.click(extension_selector)
-            print("✅ 已点击'期限を延長する'按钮")
             
             print("⏰ 等待页面跳转...")
             await asyncio.sleep(5)
-            
             await self.verify_extension_input_page()
             return True
             

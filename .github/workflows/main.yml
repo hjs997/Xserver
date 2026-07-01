@@ -1,8 +1,8 @@
 name: 🪄 XServer自动签到
 
 on:
-  repository_dispatch:
-    types: [XServer]          # Webhook 触发关键词：XServer
+  schedule:
+    - cron: '0 8 * * *'   # UTC 08:00 = 北京时间 16:00
   workflow_dispatch:        # 保留手动点击触发按钮
 
 jobs:

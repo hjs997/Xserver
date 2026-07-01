@@ -26,7 +26,7 @@ from playwright_stealth import stealth_async
 # 浏览器配置
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS") == "true"
 USE_HEADLESS = IS_GITHUB_ACTIONS or os.getenv("USE_HEADLESS", "false").lower() == "true"
-WAIT_TIMEOUT = 10000     # 页面元素等待超时时间(毫秒)
+WAIT_TIMEOUT = 30000     # 页面元素等待超时时间(毫秒)
 PAGE_LOAD_DELAY = 3      # 页面加载延迟时间(秒)
 
 # 代理配置 - 可选，不填则不使用代理
@@ -589,7 +589,7 @@ class XServerAutoLogin:
         try:
             print("🔍 正在查找'期限を延長する'按钮...")
             
-            extension_selector = "a:has-text('期限を延長する')"
+            extension_selector = "text='期限を延長する'"
             await self.page.wait_for_selector(extension_selector, timeout=self.wait_timeout)
             print("✅ 找到'期限を延長する'按钮")
             

@@ -2,7 +2,7 @@ name: 🪄 XServer自动签到
 
 on:
   schedule:
-    - cron: '0 3 * * *'  # 每天 UTC 时间 02:00 和 14:00 (北京时间上午 10:00 和晚上 22:00) 运行
+    - cron: '0 */2 * * *'  
   workflow_dispatch:
 
 jobs:

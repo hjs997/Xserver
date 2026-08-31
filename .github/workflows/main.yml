@@ -1,8 +1,6 @@
 name: 🪄 XServer自动签到
 
-on:
-  schedule:
-    - cron: '0 */2 * * *'  
+on: 
   workflow_dispatch:
 
 jobs:

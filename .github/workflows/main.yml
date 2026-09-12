@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 拉取完整历史记录，方便 rebase
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -58,8 +60,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PROXY_SERVER: socks5://127.0.0.1:1080
-          PANEL_URL: ${{ secrets.PANEL_URL }}        # 新增
-          SERVER_NAME: ${{ secrets.SERVER_NAME }} 
+          PANEL_URL: ${{ secrets.PANEL_URL }}
+          SERVER_NAME: ${{ secrets.SERVER_NAME }}
         run: python renew.py
 
       # ⏱️ 提交 time.txt 到仓库(用于解决60天无文件变化的限制)
@@ -82,7 +84,13 @@ jobs:
             echo "无变化，无需提交"
           else
             git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
-            git push origin HEAD:main
+            
+            # 拉取远程最新代码进行变基合并，并自动重试推送
+            for i in {1..5}; do
+              git pull --rebase origin main && git push origin HEAD:main && break
+              echo "推送冲突，第 $i 次重试中..."
+              sleep 2
+            done
           fi
 
       - name: 🧹 清理旧的工作流运行记录

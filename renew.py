@@ -6,7 +6,8 @@ XServer GAME 自动登录和续期脚本
 修复要点:
 1. 使用 Patchright 替代 Playwright 绕过 Cloudflare Turnstile 人机验证
 2. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
-3. 未到达游戏管理页时不再盲目点升级按钮
+3. 优化登录表单提交逻辑（Enter 键与 JS 强行提交组合拳）
+4. 增强红字错误信息抓取，精准定位登录失败原因
 """
 
 # =====================================================================
@@ -390,7 +391,7 @@ class XServerAutoLogin:
             await asyncio.sleep(0.05)
 
     async def perform_login(self):
-        """执行登录操作"""
+        """执行登录操作（包含表单强行提交优化）"""
         try:
             print("🎯 开始执行登录操作...")
 
@@ -404,22 +405,34 @@ class XServerAutoLogin:
             await self.human_type(email_selector, self.email)
             print("✅ 邮箱已填写")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
             await self.page.fill(password_selector, "")
             await self.human_type(password_selector, self.password)
             print("✅ 密码已填写")
 
+            await asyncio.sleep(1)
+
+            # 🛠️ 组合拳提交表单：聚焦密码框按 Enter，若 2 秒内没跳转再补一次按钮点击/JS强行提交
+            print("⌨️ 正在提交登录表单...")
+            await self.page.focus(password_selector)
+            await self.page.press(password_selector, "Enter")
+
             await asyncio.sleep(2)
 
-            if login_button_selector:
-                print("🖱️ 点击登录按钮...")
-                await self.page.click(login_button_selector)
-            else:
-                print("⌨️ 使用回车键提交...")
-                await self.page.press(password_selector, "Enter")
+            if "login" in self.page.url:
+                print("⚠️ Enter 提交后未检测到跳转，尝试补发点击与 Form 强行提交...")
+                try:
+                    await self.page.evaluate("""() => {
+                        const btn = document.querySelector('input[value="ログインする"], button[type="submit"]');
+                        if (btn) { btn.click(); return; }
+                        const form = document.querySelector('form');
+                        if (form) form.submit();
+                    }""")
+                except Exception as eval_e:
+                    print(f"⚠️ JavaScript 强制提交异常: {eval_e}")
 
-            print("✅ 登录表单已提交")
+            print("✅ 登录表单已提交，等待页面响应...")
             await self.safe_wait_load(timeout=30000)
             await asyncio.sleep(3)
             return True
@@ -433,10 +446,7 @@ class XServerAutoLogin:
     # =================================================================
 
     async def kick_jumpvps_redirect(self):
-        """
-        jumpvps 中间页通常靠 JS 自动 form.submit() 跳转。
-        Headless / 慢网环境下自动提交可能不触发，这里主动推动跳转。
-        """
+        """jumpvps 中间页主动提交跳转表单"""
         try:
             result = await self.page.evaluate(
                 """() => {
@@ -615,7 +625,7 @@ class XServerAutoLogin:
     # =================================================================
 
     async def handle_login_result(self):
-        """处理登录结果"""
+        """处理登录结果（支持红字报错精准抓取）"""
         try:
             print("🔍 正在检查登录结果...")
             await self.safe_wait_load(timeout=30000)
@@ -624,11 +634,23 @@ class XServerAutoLogin:
             current_url = self.page.url
             print(f"🔍 当前URL: {current_url}")
 
-            # 抓取页面上的报错文本（如有）
-            error_el = await self.page.query_selector(".err, .error, .msg-error, .login-error")
-            if error_el:
-                err_text = await error_el.text_content()
-                print(f"⚠️ 登录页显示提示信息: {err_text.strip() if err_text else ''}")
+            # 🛠️ 抓取页面所有可能的错误红字提示
+            error_text = await self.page.evaluate("""() => {
+                const selectors = [
+                    '.err', '.error', '.msg-error', '.login-error', 
+                    '.mb10.red', '.font-red', '.error_msg', 'p.red', 'div.red'
+                ];
+                for (const s of selectors) {
+                    const el = document.querySelector(s);
+                    if (el && el.innerText.trim()) {
+                        return el.innerText.trim();
+                    }
+                }
+                return '';
+            }""")
+            
+            if error_text:
+                print(f"❌ XServer 页面返回错误提示: {error_text}")
 
             if self.is_game_panel_url(current_url):
                 print("✅ 已直接进入游戏管理页面")

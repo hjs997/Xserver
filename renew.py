@@ -4,10 +4,9 @@
 XServer GAME 自动登录和续期脚本
 
 修复要点:
-1. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
-2. 页面导航中截图、读时间导致 context destroyed
+1. 使用 Patchright 替代 Playwright 绕过 Cloudflare Turnstile 人机验证
+2. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
 3. 未到达游戏管理页时不再盲目点升级按钮
-4. 登录成功 URL 放宽匹配（允许 query/trailing）
 """
 
 # =====================================================================
@@ -22,8 +21,7 @@ from datetime import timezone, timedelta
 import os
 import json
 import requests
-from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
-from playwright_stealth import stealth_async
+from patchright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
 
 # =====================================================================
 #                          配置区域
@@ -162,7 +160,7 @@ class TelegramNotifier:
 # =====================================================================
 
 class XServerAutoLogin:
-    """XServer GAME 自动登录主类 - Playwright版本"""
+    """XServer GAME 自动登录主类 - Patchright版本"""
 
     def __init__(self):
         self.playwright = None
@@ -239,7 +237,7 @@ class XServerAutoLogin:
     # =================================================================
 
     async def setup_browser(self):
-        """设置并启动 Playwright 浏览器"""
+        """设置并启动 Patchright 浏览器"""
         try:
             self.playwright = await async_playwright().start()
 
@@ -280,17 +278,14 @@ class XServerAutoLogin:
             self.page = await self.context.new_page()
             self.page.set_default_timeout(self.wait_timeout)
 
-            await stealth_async(self.page)
-            print("✅ Stealth 插件已应用")
-
             if USE_PROXY:
-                print(f"✅ Playwright 浏览器初始化成功 (使用代理: {PROXY_SERVER})")
+                print(f"✅ Patchright 浏览器初始化成功 (使用代理: {PROXY_SERVER})")
             else:
-                print("✅ Playwright 浏览器初始化成功")
+                print("✅ Patchright 浏览器初始化成功")
             return True
 
         except Exception as e:
-            print(f"❌ Playwright 浏览器初始化失败: {e}")
+            print(f"❌ Patchright 浏览器初始化失败: {e}")
             return False
 
     async def safe_wait_load(self, timeout=15000):
@@ -304,7 +299,7 @@ class XServerAutoLogin:
                 pass
 
     async def take_screenshot(self, step_name=""):
-        """截图功能 - 用于可视化调试"""
+        """截图功能 - 用于本地可视化调试"""
         try:
             if not self.page:
                 return
@@ -314,7 +309,6 @@ class XServerAutoLogin:
             timestamp = beijing_time.strftime("%H%M%S")
             filename = f"step_{self.screenshot_count:02d}_{timestamp}_{step_name}.png"
             filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-            # full_page 在跳转中容易 30s 超时，先试 full_page，失败再视口截图
             try:
                 await self.page.screenshot(path=filename, full_page=True, timeout=15000)
             except Exception:
@@ -446,7 +440,6 @@ class XServerAutoLogin:
         try:
             result = await self.page.evaluate(
                 """() => {
-                    // 1) 优先提交表单（XServer 常见 SSO 跳转方式）
                     const forms = Array.from(document.querySelectorAll('form'));
                     for (const form of forms) {
                         try {
@@ -455,7 +448,6 @@ class XServerAutoLogin:
                         } catch (e) {}
                     }
 
-                    // 2) 点击看起来像继续的链接/按钮
                     const texts = ['進む', '続行', 'こちら', 'click', 'Click', 'ゲーム管理', '管理画面'];
                     const clickables = Array.from(document.querySelectorAll('a, button, input[type=submit]'));
                     for (const el of clickables) {
@@ -466,14 +458,12 @@ class XServerAutoLogin:
                         }
                     }
 
-                    // 3) 带 game / jump 的链接
                     const link = document.querySelector('a[href*="game"], a[href*="jump"], a[href*="xmgame"]');
                     if (link && link.href) {
                         window.location.href = link.href;
                         return { ok: true, method: 'location.href', href: link.href };
                     }
 
-                    // 4) meta refresh
                     const meta = document.querySelector('meta[http-equiv="refresh" i]');
                     if (meta) {
                         const content = meta.getAttribute('content') || '';
@@ -514,7 +504,6 @@ class XServerAutoLogin:
 
             if self.is_game_panel_url(url):
                 await self.safe_wait_load(timeout=20000)
-                # 再确认一次 URL（防止中间页误匹配）
                 try:
                     url = self.page.url
                 except Exception:
@@ -524,7 +513,6 @@ class XServerAutoLogin:
                     return True
 
             if "jumpvps" in (url or ""):
-                # 每 8 秒尝试一次推动跳转，最多 3 次
                 now = time.time()
                 if kick_count < 3 and (now - kicked_at) >= 8:
                     print(f"🔄 仍在 jumpvps，尝试主动跳转 ({kick_count + 1}/3)...")
@@ -533,7 +521,6 @@ class XServerAutoLogin:
                     kick_count += 1
                     kicked_at = now
             else:
-                # 不在 jumpvps 也不在 game panel：可能还在 xapanel 其它页
                 print(f"ℹ️ 当前中间 URL: {url}")
 
             await asyncio.sleep(1)
@@ -551,7 +538,6 @@ class XServerAutoLogin:
         await self.page.wait_for_selector(game_button_selector, timeout=self.wait_timeout)
         print("✅ 找到ゲーム管理按钮")
 
-        # 同时监听：同页导航 + 新标签页
         popup_task = asyncio.create_task(
             self.context.wait_for_event("page", timeout=12000)
         )
@@ -563,18 +549,15 @@ class XServerAutoLogin:
             print("✅ 已点击ゲーム管理按钮 (当前页导航)")
         except Exception as e:
             nav_error = e
-            # 可能是新标签打开，没有当前页 navigation
             try:
                 await self.page.click(game_button_selector)
             except Exception:
                 pass
             print(f"ℹ️ 当前页 navigation 未完成(可能新标签打开): {nav_error}")
 
-        # 检查是否开了新标签
         try:
             new_page = await asyncio.wait_for(asyncio.shield(popup_task), timeout=0.5)
         except Exception:
-            # 再等一会儿拿 popup
             try:
                 new_page = await popup_task
             except Exception:
@@ -584,10 +567,6 @@ class XServerAutoLogin:
 
         if new_page is not None:
             print(f"✅ 检测到新标签页: {new_page.url}")
-            try:
-                await stealth_async(new_page)
-            except Exception:
-                pass
             self.page = new_page
             self.page.set_default_timeout(self.wait_timeout)
             await self.safe_wait_load(timeout=30000)
@@ -601,7 +580,6 @@ class XServerAutoLogin:
 
         if "jumpvps" in current_url:
             print("🔄 检测到中间跳转页面 (jumpvps)")
-            # 先等 3 秒看是否自己跳
             for _ in range(3):
                 await asyncio.sleep(1)
                 try:
@@ -610,7 +588,6 @@ class XServerAutoLogin:
                 except Exception:
                     pass
             else:
-                # 仍在 jumpvps，主动推一次
                 await self.kick_jumpvps_redirect()
 
         ok = await self.wait_for_game_panel(timeout_sec=JUMPVPS_TIMEOUT)
@@ -647,7 +624,12 @@ class XServerAutoLogin:
             current_url = self.page.url
             print(f"🔍 当前URL: {current_url}")
 
-            # 登录后有时会直接到 jumpvps 或 game panel
+            # 抓取页面上的报错文本（如有）
+            error_el = await self.page.query_selector(".err, .error, .msg-error, .login-error")
+            if error_el:
+                err_text = await error_el.text_content()
+                print(f"⚠️ 登录页显示提示信息: {err_text.strip() if err_text else ''}")
+
             if self.is_game_panel_url(current_url):
                 print("✅ 已直接进入游戏管理页面")
                 await self.take_screenshot("game_page_loaded")
@@ -737,7 +719,6 @@ class XServerAutoLogin:
 
                         return
 
-                # 宽松再扫一遍 body
                 body_text = await self.page.locator("body").inner_text()
                 remaining_match = re.search(r"残り(\d+時間\d+分)", body_text)
                 if remaining_match:
@@ -781,7 +762,6 @@ class XServerAutoLogin:
             print("📄 正在查找アップグレード・期限延長按钮...")
             await self.safe_wait_load(timeout=15000)
 
-            # 多种选择器兼容
             candidates = [
                 "a:has-text('アップグレード・期限延長')",
                 "text=アップグレード・期限延長",
@@ -1208,8 +1188,8 @@ class XServerAutoLogin:
 async def main():
     """主函数"""
     print("=" * 60)
-    print("XServer GAME 自动登录脚本 - Playwright版本")
-    print("基于 Playwright + stealth (jumpvps 修复版)")
+    print("XServer GAME 自动登录脚本 - Patchright版本")
+    print("基于 Patchright 防检测")
     print("=" * 60)
     print()
 

@@ -1,7 +1,10 @@
 name: 🪄 XServer自动签到
 
 on: 
-  workflow_dispatch:
+  #schedule:
+    # 每天 UTC 0:00 (北京时间 8:00) 自动运行
+    #- cron: '0 0 * * *'
+  workflow_dispatch: # 支持手动触发
 
 jobs:
   run:
@@ -15,6 +18,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: 优化 Apt 源与安装 Xvfb 虚拟显示
+        run: |
+          # 替换源防止超时卡死
+          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+          sudo sed -i 's|http://*.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
+          sudo apt-get update -o Acquire::Connect-Timeout=10 -o Acquire::Request-Timeout=10
+          # 安装 Xvfb 虚拟桌面（解决 Cloudflare 无头浏览器检测问题）
+          sudo apt-get install -y xvfb
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -37,18 +49,31 @@ jobs:
           patchright install chromium --with-deps
 
       - name: 设置代理隧道 (Gost)
+        id: gost_setup
         env:
           PROXY_STR: ${{ secrets.PROXY_SERVER }}
         run: |
+          if [ -z "$PROXY_STR" ]; then
+            echo "⚠️ 未配置 PROXY_SERVER，跳过代理隧道搭建，降级为直连模式"
+            echo "USE_LOCAL_PROXY=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
           wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip gost-linux-amd64-2.11.5.gz
+          gunzip -f gost-linux-amd64-2.11.5.gz
           chmod +x gost-linux-amd64-2.11.5
           nohup ./gost-linux-amd64-2.11.5 -L :1080 -F "$PROXY_STR" > gost.log 2>&1 &
           sleep 5
           cat gost.log || true
           
           echo "🧪 测试代理连通性与出站 IP:"
-          curl -s -x socks5://127.0.0.1:1080 https://api.ipify.org?format=json || echo "❌ 代理网络连接失败"
+          if curl -s -x socks5://127.0.0.1:1080 --max-time 10 https://api.ipify.org?format=json; then
+            echo "✅ 代理连接成功！"
+            echo "USE_LOCAL_PROXY=true" >> $GITHUB_ENV
+          else
+            echo "❌ 代理节点报错或连通失败，自动降级为直连模式"
+            echo "USE_LOCAL_PROXY=false" >> $GITHUB_ENV
+          fi
 
       - name: 🎲 随机延迟（0-120秒）
         run: |
@@ -56,16 +81,19 @@ jobs:
           echo "Random delay: ${delay}s"
           sleep $delay
 
-      - name: 运行脚本
+      - name: 运行脚本 (使用 Xvfb 虚拟窗口渲染)
         env:
           XSERVER_EMAIL: ${{ secrets.XSERVER_EMAIL }}
           XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PROXY_SERVER: socks5://127.0.0.1:1080
+          # 只有当代理测试成功时才传入 1080，避免无代理时报 ERR_PROXY_CONNECTION_FAILED
+          PROXY_SERVER: ${{ env.USE_LOCAL_PROXY == 'true' && 'socks5://127.0.0.1:1080' || '' }}
           PANEL_URL: ${{ secrets.PANEL_URL }}
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
-        run: python renew.py
+        run: |
+          # 配合 Xvfb 环境运行脚本
+          xvfb-run --auto-servernum python renew.py
 
       - name: 📸 上传运行截图 (便于排查)
         if: always()

@@ -1,10 +1,9 @@
 name: 🪄 XServer自动签到
 
-on: 
-  #schedule:
-    # 每天 UTC 0:00 (北京时间 8:00) 自动运行
-    #- cron: '0 0 * * *'
-  workflow_dispatch: # 支持手动触发
+on:
+  schedule:
+    - cron: '0 0/12 * * *'  # 每 12 小时自动运行一次
+  workflow_dispatch:        # 支持手动点击触发
 
 jobs:
   run:
@@ -21,11 +20,9 @@ jobs:
 
       - name: 优化 Apt 源与安装 Xvfb 虚拟显示
         run: |
-          # 替换源防止超时卡死
           sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
           sudo sed -i 's|http://*.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
           sudo apt-get update -o Acquire::Connect-Timeout=10 -o Acquire::Request-Timeout=10
-          # 安装 Xvfb 虚拟桌面（解决 Cloudflare 无头浏览器检测问题）
           sudo apt-get install -y xvfb
 
       - name: 设置 Python 环境
@@ -38,15 +35,15 @@ jobs:
         with:
           path: |
             ~/.cache/pip
-            ~/.cache/ms-patchright
+            ~/.cache/ms-playwright
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: 安装依赖
+      - name: 安装依赖与 Playwright 浏览器
         run: |
           pip install -r requirements.txt
-          patchright install chromium --with-deps
+          python -m playwright install --with-deps chromium
 
       - name: 设置代理隧道 (Gost)
         id: gost_setup
@@ -87,12 +84,10 @@ jobs:
           XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # 只有当代理测试成功时才传入 1080，避免无代理时报 ERR_PROXY_CONNECTION_FAILED
           PROXY_SERVER: ${{ env.USE_LOCAL_PROXY == 'true' && 'socks5://127.0.0.1:1080' || '' }}
           PANEL_URL: ${{ secrets.PANEL_URL }}
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
         run: |
-          # 配合 Xvfb 环境运行脚本
           xvfb-run --auto-servernum python renew.py
 
       - name: 📸 上传运行截图 (便于排查)

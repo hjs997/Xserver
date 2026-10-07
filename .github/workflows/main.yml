@@ -26,7 +26,7 @@ jobs:
         with:
           path: |
             ~/.cache/pip
-            ~/.cache/ms-playwright
+            ~/.cache/ms-patchright
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
@@ -34,7 +34,7 @@ jobs:
       - name: 安装依赖
         run: |
           pip install -r requirements.txt
-          python -m playwright install chromium
+          patchright install chromium --with-deps
 
       - name: 设置代理隧道 (Gost)
         env:

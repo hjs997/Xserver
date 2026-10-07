@@ -6,8 +6,9 @@ XServer GAME 自动登录和续期脚本
 修复要点:
 1. 使用 Patchright 替代 Playwright 绕过 Cloudflare Turnstile 人机验证
 2. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
-3. 优化登录表单提交逻辑（Enter 键与 JS 强行提交组合拳）
-4. 增强红字错误信息抓取，精准定位登录失败原因
+3. 原生 JS 事件注入与强制表单提交（防止前端框架拦截）
+4. 增设 form_filled 阶段截图，便于调试输入框是否成功填入数据
+5. 增强红字错误信息抓取，精准定位登录失败原因
 """
 
 # =====================================================================
@@ -384,14 +385,8 @@ class XServerAutoLogin:
             print(f"❌ 查找登录表单时出错: {e}")
             return None, None, None
 
-    async def human_type(self, selector, text):
-        """模拟人类输入行为"""
-        for char in text:
-            await self.page.type(selector, char, delay=100)
-            await asyncio.sleep(0.05)
-
     async def perform_login(self):
-        """执行登录操作（包含表单强行提交优化）"""
+        """执行登录操作（原生 JS 事件注入与强行提交）"""
         try:
             print("🎯 开始执行登录操作...")
 
@@ -399,41 +394,54 @@ class XServerAutoLogin:
             if not email_selector or not password_selector:
                 return False
 
-            print("📝 正在填写登录信息...")
+            print("📝 正在注入登录数据并触发原生 Event...")
 
-            await self.page.fill(email_selector, "")
-            await self.human_type(email_selector, self.email)
-            print("✅ 邮箱已填写")
+            # 使用 JavaScript 直接赋值并触发 input/change 事件，防止前端框架拦截
+            await self.page.evaluate("""({email, password}) => {
+                const emailInput = document.querySelector('input[name="memberid"]');
+                const pwdInput = document.querySelector('input[name="user_password"]');
+                
+                if (emailInput) {
+                    emailInput.value = email;
+                    emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                
+                if (pwdInput) {
+                    pwdInput.value = password;
+                    pwdInput.dispatchEvent(new Event('input', { bubbles: true }));
+                    pwdInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }""", {"email": self.email, "password": self.password})
 
+            print("✅ 账号密码已通过原生 Event 注入完成")
             await asyncio.sleep(1)
 
-            await self.page.fill(password_selector, "")
-            await self.human_type(password_selector, self.password)
-            print("✅ 密码已填写")
+            # 保存填完后的截图，便于确认表单是否真正填上
+            await self.take_screenshot("form_filled")
 
-            await asyncio.sleep(1)
-
-            # 🛠️ 组合拳提交表单：聚焦密码框按 Enter，若 2 秒内没跳转再补一次按钮点击/JS强行提交
             print("⌨️ 正在提交登录表单...")
-            await self.page.focus(password_selector)
-            await self.page.press(password_selector, "Enter")
+            submitted = await self.page.evaluate("""() => {
+                const btn = document.querySelector('input[value="ログインする"], button[type="submit"], input[type="submit"]');
+                if (btn) {
+                    btn.click();
+                    return 'button_clicked';
+                }
+                const form = document.querySelector('form');
+                if (form) {
+                    form.submit();
+                    return 'form_submitted';
+                }
+                return 'failed';
+            }""")
 
-            await asyncio.sleep(2)
+            print(f"✅ 提交动作响应: {submitted}")
+            
+            try:
+                await self.page.wait_for_navigation(timeout=15000, wait_until="domcontentloaded")
+            except Exception:
+                print("ℹ️ 未检测到标准页面重定向，继续检查状态...")
 
-            if "login" in self.page.url:
-                print("⚠️ Enter 提交后未检测到跳转，尝试补发点击与 Form 强行提交...")
-                try:
-                    await self.page.evaluate("""() => {
-                        const btn = document.querySelector('input[value="ログインする"], button[type="submit"]');
-                        if (btn) { btn.click(); return; }
-                        const form = document.querySelector('form');
-                        if (form) form.submit();
-                    }""")
-                except Exception as eval_e:
-                    print(f"⚠️ JavaScript 强制提交异常: {eval_e}")
-
-            print("✅ 登录表单已提交，等待页面响应...")
-            await self.safe_wait_load(timeout=30000)
             await asyncio.sleep(3)
             return True
 

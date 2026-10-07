@@ -5,10 +5,11 @@ XServer GAME 自动登录和续期脚本
 
 修复要点:
 1. 使用 Patchright 替代 Playwright 绕过 Cloudflare Turnstile 人机验证
-2. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
-3. 原生 JS 事件注入与强制表单提交（防止前端框架拦截）
-4. 增设 form_filled 阶段截图，便于调试输入框是否成功填入数据
-5. 增强红字错误信息抓取，精准定位登录失败原因
+2. 增加 Cloudflare Turnstile 验证码自动识别与模拟点击逻辑（解决「私はロボットではありません」报错）
+3. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
+4. 原生 JS 事件注入与强制表单提交（防止前端框架拦截）
+5. 增设 form_filled 阶段截图，便于调试输入框是否成功填入数据
+6. 增强红字错误信息抓取，精准定位登录失败原因
 """
 
 # =====================================================================
@@ -386,7 +387,7 @@ class XServerAutoLogin:
             return None, None, None
 
     async def perform_login(self):
-        """执行登录操作（原生 JS 事件注入与强行提交）"""
+        """执行登录操作（包含 Cloudflare Turnstile 验证码自动点击）"""
         try:
             print("🎯 开始执行登录操作...")
 
@@ -396,7 +397,7 @@ class XServerAutoLogin:
 
             print("📝 正在注入登录数据并触发原生 Event...")
 
-            # 使用 JavaScript 直接赋值并触发 input/change 事件，防止前端框架拦截
+            # 1. 注入账号密码
             await self.page.evaluate("""({email, password}) => {
                 const emailInput = document.querySelector('input[name="memberid"]');
                 const pwdInput = document.querySelector('input[name="user_password"]');
@@ -417,7 +418,38 @@ class XServerAutoLogin:
             print("✅ 账号密码已通过原生 Event 注入完成")
             await asyncio.sleep(1)
 
-            # 保存填完后的截图，便于确认表单是否真正填上
+            # 2. 处理 Cloudflare Turnstile 验证码
+            print("⏳ 正在检查并处理 Cloudflare Turnstile 验证...")
+            try:
+                turnstile_frame = None
+                for _ in range(10):
+                    for frame in self.page.frames:
+                        if "challenges.cloudflare.com" in frame.url or "turnstile" in frame.url:
+                            turnstile_frame = frame
+                            break
+                    if turnstile_frame:
+                        break
+                    await asyncio.sleep(1)
+
+                if turnstile_frame:
+                    print("🔍 检测到 Turnstile 验证码 iframe，尝试模拟点击...")
+                    await asyncio.sleep(2)
+                    checkbox = turnstile_frame.locator('input[type="checkbox"], .mark, #challenge-stage, body')
+                    if await checkbox.count() > 0:
+                        await checkbox.first.click()
+                        print("✅ 已点击 Turnstile 复选框区域")
+                    else:
+                        await turnstile_frame.click('body')
+                        print("✅ 已点击 Turnstile iframe 区域")
+                    
+                    print("⏳ 等待 4 秒以通过 Turnstile 验证...")
+                    await asyncio.sleep(4)
+                else:
+                    print("ℹ️ 未定位到 Turnstile iframe，继续下一步...")
+            except Exception as cf_e:
+                print(f"⚠️ 处理 Turnstile 验证码时出错(尝试继续): {cf_e}")
+
+            # 保存填完表单与处理验证码后的截图
             await self.take_screenshot("form_filled")
 
             print("⌨️ 正在提交登录表单...")

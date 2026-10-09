@@ -1,19 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XServer GAME 自动登录和续期脚本
+XServer GAME 自动登录和续期脚本 - DrissionPage 真实 Chrome 版
 
-修复要点:
-1. jumpvps 中间页：主动提交跳转表单 / 处理新标签 / 更长等待
-2. 页面导航中截图、读时间导致 context destroyed
-3. 未到达游戏管理页时不再盲目点升级按钮
-4. 登录成功 URL 放宽匹配（允许 query/trailing）
-5. 登录表单：通用 Locator 精准抓取账号/密码框/登录按钮及 Turnstile 验证等待
+核心特点:
+1. 基于 DrissionPage 直接驱动系统级 Chrome 浏览器，配合 Xvfb 穿透 Cloudflare Turnstile
+2. 完整保留原版业务逻辑：JumpVPS 跳转处理、多步续期导航、Telegram 推送、面板上报
 """
-
-# =====================================================================
-#                          导入依赖
-# =====================================================================
 
 import asyncio
 import time
@@ -23,23 +16,20 @@ from datetime import timezone, timedelta
 import os
 import json
 import requests
-from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Page
-from playwright_stealth import stealth_async
+from DrissionPage import ChromiumPage, ChromiumOptions
 
 # =====================================================================
 #                          配置区域
 # =====================================================================
 
-# 浏览器配置
 IS_GITHUB_ACTIONS = os.getenv("GITHUB_ACTIONS") == "true"
-USE_HEADLESS = IS_GITHUB_ACTIONS or os.getenv("USE_HEADLESS", "false").lower() == "true"
-WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "15000"))  # 页面元素等待超时时间(毫秒)
+WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "15"))  # 页面元素等待超时时间(秒)
 PAGE_LOAD_DELAY = int(os.getenv("PAGE_LOAD_DELAY", "3"))  # 页面加载延迟时间(秒)
 JUMPVPS_TIMEOUT = int(os.getenv("JUMPVPS_TIMEOUT", "60"))  # jumpvps 等待秒数
 
 # 代理配置 - 可选，不填则不使用代理
 PROXY_SERVER = os.getenv("PROXY_SERVER") or ""
-USE_PROXY = bool(PROXY_SERVER)  # 如果有代理地址则启用
+USE_PROXY = bool(PROXY_SERVER)
 
 # XServer登录配置 - 可以直接填写或使用环境变量
 LOGIN_EMAIL = os.getenv("XSERVER_EMAIL") or ""
@@ -77,7 +67,6 @@ class TelegramNotifier:
             print("ℹ️ Telegram 推送未启用(缺少 BOT_TOKEN 或 CHAT_ID)")
 
     def send_photo(self, photo_path, caption=None):
-        """发送 Telegram 图片"""
         if not self.enabled:
             return False
 
@@ -103,7 +92,6 @@ class TelegramNotifier:
             return False
 
     def send_message(self, message, parse_mode="HTML"):
-        """发送 Telegram 消息"""
         if not self.enabled:
             print("⚠️ Telegram 推送未启用,跳过发送")
             return False
@@ -131,7 +119,6 @@ class TelegramNotifier:
             return False
 
     def send_renewal_result(self, status, old_time, new_time=None, run_time=None):
-        """发送续期结果通知"""
         beijing_time = datetime.datetime.now(timezone(timedelta(hours=8)))
         timestamp = run_time or beijing_time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -159,18 +146,14 @@ class TelegramNotifier:
 
 
 # =====================================================================
-#                        XServer 自动登录类
+#                        XServer 自动登录主类
 # =====================================================================
 
 class XServerAutoLogin:
-    """XServer GAME 自动登录主类 - Playwright版本"""
+    """XServer GAME 自动登录主类 - DrissionPage 版本"""
 
     def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.context = None
         self.page = None
-        self.headless = USE_HEADLESS
         self.email = LOGIN_EMAIL
         self.password = LOGIN_PASSWORD
         self.target_url = TARGET_URL
@@ -188,7 +171,6 @@ class XServerAutoLogin:
         self.telegram = TelegramNotifier()
 
     def report_status(self, remaining_seconds):
-        """上报状态到面板"""
         if not PANEL_URL:
             print("ℹ️ 未配置 PANEL_URL，跳过上报")
             return
@@ -204,7 +186,6 @@ class XServerAutoLogin:
             print(f"❌ 上报失败: {e}")
 
     def parse_remaining_seconds(self, time_str):
-        """解析剩余时间字符串为秒数，例如: '30時間57分' -> 111420"""
         try:
             hours = 0
             minutes = 0
@@ -239,108 +220,57 @@ class XServerAutoLogin:
     #                       1. 浏览器管理模块
     # =================================================================
 
-    async def setup_browser(self):
-        """设置并启动 Playwright 浏览器"""
+    def setup_browser(self):
+        """设置并启动 DrissionPage 真实 Chrome 浏览器"""
         try:
-            self.playwright = await async_playwright().start()
-
-            browser_args = [
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-notifications",
-                "--window-size=1920,1080",
-                "--lang=ja-JP",
-                "--accept-lang=ja-JP,ja,en-US,en",
-            ]
+            co = ChromiumOptions()
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-dev-shm-usage")
+            co.set_argument("--disable-gpu")
+            co.set_argument("--window-size=1920,1080")
+            co.set_argument("--lang=ja-JP")
 
             if USE_PROXY and PROXY_SERVER:
                 print(f"🌐 使用代理: {PROXY_SERVER}")
-                browser_args.append(f"--proxy-server={PROXY_SERVER}")
+                co.set_proxy(PROXY_SERVER)
 
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.headless,
-                args=browser_args,
-            )
+            # 保持 headless=False，在 Xvfb 虚拟屏幕中显示运行以穿透 Cloudflare
+            self.page = ChromiumPage(co)
+            self.page.set.timeouts(base=self.wait_timeout)
 
-            context_options = {
-                "viewport": {"width": 1920, "height": 1080},
-                "locale": "ja-JP",
-                "timezone_id": "Asia/Tokyo",
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            }
-
-            if USE_PROXY and PROXY_SERVER:
-                context_options["proxy"] = {"server": PROXY_SERVER}
-
-            self.context = await self.browser.new_context(**context_options)
-            self.page = await self.context.new_page()
-            self.page.set_default_timeout(self.wait_timeout)
-
-            await stealth_async(self.page)
-            print("✅ Stealth 插件已应用")
-
-            if USE_PROXY:
-                print(f"✅ Playwright 浏览器初始化成功 (使用代理: {PROXY_SERVER})")
-            else:
-                print("✅ Playwright 浏览器初始化成功")
+            print("✅ DrissionPage 浏览器初始化成功 (真实 Chrome + Xvfb)")
             return True
 
         except Exception as e:
-            print(f"❌ Playwright 浏览器初始化失败: {e}")
+            print(f"❌ DrissionPage 浏览器初始化失败: {e}")
             return False
 
-    async def safe_wait_load(self, timeout=15000):
-        """等待页面加载稳定，忽略导航中的异常"""
-        if not self.page:
-            return
-        for state in ("domcontentloaded", "load"):
-            try:
-                await self.page.wait_for_load_state(state, timeout=timeout)
-            except Exception:
-                pass
-
-    async def take_screenshot(self, step_name=""):
-        """截图功能 - 用于可视化调试"""
+    def take_screenshot(self, step_name=""):
+        """截图功能"""
         try:
             if not self.page:
                 return
-            await self.safe_wait_load(timeout=10000)
             self.screenshot_count += 1
             beijing_time = datetime.datetime.now(timezone(timedelta(hours=8)))
             timestamp = beijing_time.strftime("%H%M%S")
             filename = f"step_{self.screenshot_count:02d}_{timestamp}_{step_name}.png"
             filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
-            # full_page 在跳转中容易 30s 超时，先试 full_page，失败再视口截图
-            try:
-                await self.page.screenshot(path=filename, full_page=True, timeout=15000)
-            except Exception:
-                await self.page.screenshot(path=filename, full_page=False, timeout=10000)
+            self.page.get_screenshot(path=filename)
             print(f"📸 截图已保存: {filename}")
         except Exception as e:
             print(f"⚠️ 截图失败: {e}")
 
     def validate_config(self):
-        """验证配置信息"""
         if not self.email or not self.password:
             print("❌ 邮箱或密码未设置!")
             return False
         print("✅ 配置信息验证通过")
         return True
 
-    async def cleanup(self):
-        """清理资源"""
+    def cleanup(self):
         try:
-            if self.context:
-                await self.context.close()
-            if self.browser:
-                await self.browser.close()
-            if self.playwright:
-                await self.playwright.stop()
+            if self.page:
+                self.page.quit()
             print("🧹 浏览器已关闭")
         except Exception as e:
             print(f"⚠️ 清理资源时出错: {e}")
@@ -349,14 +279,12 @@ class XServerAutoLogin:
     #                       2. 页面导航模块
     # =================================================================
 
-    async def navigate_to_login(self):
-        """导航到登录页面"""
+    def navigate_to_login(self):
         try:
             print(f"🌐 正在访问: {self.target_url}")
-            await self.page.goto(self.target_url, wait_until="load", timeout=60000)
-            await self.page.wait_for_selector("body", timeout=self.wait_timeout)
+            self.page.get(self.target_url)
             print("✅ 页面加载成功")
-            await self.take_screenshot("login_page_loaded")
+            self.take_screenshot("login_page_loaded")
             return True
         except Exception as e:
             print(f"❌ 导航失败: {e}")
@@ -366,92 +294,72 @@ class XServerAutoLogin:
     #                       3. 登录表单处理模块
     # =================================================================
 
-    async def find_login_form(self):
-        """查找登录表单元素 (使用增强版通用定位器)"""
+    def find_login_form(self):
         try:
             print("🔍 正在查找登录表单...")
-            await asyncio.sleep(self.page_load_delay)
+            time.sleep(self.page_load_delay)
 
-            # 通用文本/邮箱输入框定位
-            email_locator = self.page.locator(
-                'input[type="text"], input[type="email"], input[name="memberid"], input[name="member_id"], input[placeholder*="example"]'
-            ).first
-            await email_locator.wait_for(state="visible", timeout=self.wait_timeout)
+            email_ele = self.page.ele('css:input[name="member_id"], input[name="memberid"], input[type="text"], input[type="email"]')
+            if not email_ele:
+                raise RuntimeError("未找到账号输入框")
             print("✅ 找到账号/邮箱输入框")
 
-            # 通用密码框定位
-            password_locator = self.page.locator('input[type="password"]').first
-            await password_locator.wait_for(state="visible", timeout=self.wait_timeout)
+            password_ele = self.page.ele('css:input[name="user_password"], input[type="password"]')
+            if not password_ele:
+                raise RuntimeError("未找到密码输入框")
             print("✅ 找到密码输入框")
 
-            # 通用提交按钮定位
-            login_button_locator = self.page.locator(
-                'button:has-text("ログインする"), input[value="ログインする"], button[type="submit"]'
-            ).first
-            await login_button_locator.wait_for(state="visible", timeout=self.wait_timeout)
+            login_btn_ele = self.page.ele('css:button[type="submit"], input[type="submit"], button:contains("ログインする")')
             print("✅ 找到登录按钮")
 
-            return email_locator, password_locator, login_button_locator
+            return email_ele, password_ele, login_btn_ele
 
         except Exception as e:
             print(f"❌ 查找登录表单时出错: {e}")
             return None, None, None
 
-    async def human_type_locator(self, locator, text):
-        """针对 Locator 的人类模拟输入"""
-        for char in text:
-            await locator.type(char, delay=100)
-            await asyncio.sleep(0.05)
-
-    async def perform_login(self):
-        """执行登录操作"""
+    def perform_login(self):
         try:
             print("🎯 开始执行登录操作...")
 
-            email_loc, password_loc, login_btn_loc = await self.find_login_form()
-            if not email_loc or not password_loc:
+            email_ele, password_ele, login_btn_ele = self.find_login_form()
+            if not email_ele or not password_ele:
                 return False
 
             print("📝 正在填写登录信息...")
-
-            await email_loc.fill("")
-            await self.human_type_locator(email_loc, self.email)
+            email_ele.input(self.email, clear=True)
             print("✅ 邮箱已填写")
 
-            await asyncio.sleep(1)
+            time.sleep(1)
 
-            await password_loc.fill("")
-            await self.human_type_locator(password_loc, self.password)
+            password_ele.input(self.password, clear=True)
             print("✅ 密码已填写")
 
-            await asyncio.sleep(1)
+            time.sleep(1)
 
-            # Cloudflare Turnstile 等待
             print("⏳ 检查并等待 Cloudflare Turnstile 自动完成验证 (最多 30 秒)...")
             token_passed = False
             for i in range(30):
-                has_token = await self.page.evaluate("""() => {
-                    const el = document.querySelector('input[name="cf-turnstile-response"], input[name="g-recaptcha-response"]');
-                    return el && el.value && el.value.length > 20;
-                }""")
-                if has_token:
+                res = self.page.run_js(
+                    'const el = document.querySelector("input[name=\\"cf-turnstile-response\\"], input[name=\\"g-recaptcha-response\\"]"); return el ? el.value : "";'
+                )
+                if res and len(res) > 20:
                     token_passed = True
                     print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒自动验证通过！")
                     break
-                await asyncio.sleep(1)
+                time.sleep(1)
 
-            await self.take_screenshot("form_filled")
+            self.take_screenshot("form_filled")
 
-            if login_btn_loc:
+            if login_btn_ele:
                 print("🖱️ 点击登录按钮...")
-                await login_btn_loc.click()
+                login_btn_ele.click()
             else:
                 print("⌨️ 使用回车键提交...")
-                await password_loc.press("Enter")
+                password_ele.input("\n")
 
             print("✅ 登录表单已提交")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(3)
+            time.sleep(3)
             return True
 
         except Exception as e:
@@ -462,15 +370,10 @@ class XServerAutoLogin:
     #                   jumpvps / 游戏管理页跳转
     # =================================================================
 
-    async def kick_jumpvps_redirect(self):
-        """
-        jumpvps 中间页通常靠 JS 自动 form.submit() 跳转。
-        Headless / 慢网环境下自动提交可能不触发，这里主动推动跳转。
-        """
+    def kick_jumpvps_redirect(self):
         try:
-            result = await self.page.evaluate(
+            result = self.page.run_js(
                 """() => {
-                    // 1) 优先提交表单（XServer 常见 SSO 跳转方式）
                     const forms = Array.from(document.querySelectorAll('form'));
                     for (const form of forms) {
                         try {
@@ -479,7 +382,6 @@ class XServerAutoLogin:
                         } catch (e) {}
                     }
 
-                    // 2) 点击看起来像继续的链接/按钮
                     const texts = ['進む', '続行', 'こちら', 'click', 'Click', 'ゲーム管理', '管理画面'];
                     const clickables = Array.from(document.querySelectorAll('a, button, input[type=submit]'));
                     for (const el of clickables) {
@@ -490,22 +392,10 @@ class XServerAutoLogin:
                         }
                     }
 
-                    // 3) 带 game / jump 的链接
                     const link = document.querySelector('a[href*="game"], a[href*="jump"], a[href*="xmgame"]');
                     if (link && link.href) {
                         window.location.href = link.href;
                         return { ok: true, method: 'location.href', href: link.href };
-                    }
-
-                    // 4) meta refresh
-                    const meta = document.querySelector('meta[http-equiv="refresh" i]');
-                    if (meta) {
-                        const content = meta.getAttribute('content') || '';
-                        const m = content.match(/url=(.+)/i);
-                        if (m && m[1]) {
-                            window.location.href = m[1].trim().replace(/^['"]|['"]$/g, '');
-                            return { ok: true, method: 'meta.refresh', href: m[1] };
-                        }
                     }
 
                     return { ok: false, method: 'none' };
@@ -517,11 +407,10 @@ class XServerAutoLogin:
             print(f"⚠️ jumpvps 页未找到可提交的跳转元素: {result}")
             return False
         except Exception as e:
-            print(f"⚠️ jumpvps 推动跳转失败(可能正在导航): {e}")
+            print(f"⚠️ jumpvps 推动跳转失败: {e}")
             return False
 
-    async def wait_for_game_panel(self, timeout_sec=None):
-        """等待离开 jumpvps 并进入游戏管理相关页面"""
+    def wait_for_game_panel(self, timeout_sec=None):
         timeout_sec = timeout_sec or JUMPVPS_TIMEOUT
         deadline = time.time() + timeout_sec
         kicked_at = 0
@@ -530,18 +419,11 @@ class XServerAutoLogin:
         print(f"🔄 等待进入游戏管理页面 (最多 {timeout_sec}s)...")
 
         while time.time() < deadline:
-            try:
-                url = self.page.url
-            except Exception:
-                await asyncio.sleep(0.5)
-                continue
+            url = self.page.url
 
             if self.is_game_panel_url(url):
-                await self.safe_wait_load(timeout=20000)
-                try:
-                    url = self.page.url
-                except Exception:
-                    pass
+                time.sleep(2)
+                url = self.page.url
                 if self.is_game_panel_url(url):
                     print(f"✅ 已到达游戏管理相关页面: {url}")
                     return True
@@ -550,152 +432,101 @@ class XServerAutoLogin:
                 now = time.time()
                 if kick_count < 3 and (now - kicked_at) >= 8:
                     print(f"🔄 仍在 jumpvps，尝试主动跳转 ({kick_count + 1}/3)...")
-                    await self.take_screenshot(f"jumpvps_retry_{kick_count + 1}")
-                    await self.kick_jumpvps_redirect()
+                    self.take_screenshot(f"jumpvps_retry_{kick_count + 1}")
+                    self.kick_jumpvps_redirect()
                     kick_count += 1
                     kicked_at = now
             else:
                 print(f"ℹ️ 当前中间 URL: {url}")
 
-            await asyncio.sleep(1)
+            time.sleep(1)
 
-        try:
-            print(f"⚠️ 等待游戏管理页超时，最终 URL: {self.page.url}")
-        except Exception:
-            print("⚠️ 等待游戏管理页超时，且无法读取 URL")
+        print(f"⚠️ 等待游戏管理页超时，最终 URL: {self.page.url}")
         return False
 
-    async def open_game_management(self):
-        """点击ゲーム管理，处理同页跳转 / 新标签 / jumpvps"""
+    def open_game_management(self):
         print("🔍 正在查找ゲーム管理按钮...")
-        game_button_selector = "a:has-text('ゲーム管理')"
-        await self.page.wait_for_selector(game_button_selector, timeout=self.wait_timeout)
-        print("✅ 找到ゲーム管理按钮")
+        game_btn = self.page.ele("text:ゲーム管理")
+        if game_btn:
+            print("✅ 找到ゲーム管理按钮，执行点击...")
+            game_btn.click()
 
-        popup_task = asyncio.create_task(
-            self.context.wait_for_event("page", timeout=12000)
-        )
+        time.sleep(3)
+        # DrissionPage 自动切到最新的活动 Tab 标签页
+        self.page = self.page.latest_tab
 
-        nav_error = None
-        try:
-            async with self.page.expect_navigation(wait_until="domcontentloaded", timeout=30000):
-                await self.page.click(game_button_selector)
-            print("✅ 已点击ゲーム管理按钮 (当前页导航)")
-        except Exception as e:
-            nav_error = e
-            try:
-                await self.page.click(game_button_selector)
-            except Exception:
-                pass
-            print(f"ℹ️ 当前页 navigation 未完成(可能新标签打开): {nav_error}")
-
-        try:
-            new_page = await asyncio.wait_for(asyncio.shield(popup_task), timeout=0.5)
-        except Exception:
-            try:
-                new_page = await popup_task
-            except Exception:
-                new_page = None
-                if not popup_task.done():
-                    popup_task.cancel()
-
-        if new_page is not None:
-            print(f"✅ 检测到新标签页: {new_page.url}")
-            try:
-                await stealth_async(new_page)
-            except Exception:
-                pass
-            self.page = new_page
-            self.page.set_default_timeout(self.wait_timeout)
-            await self.safe_wait_load(timeout=30000)
-
-        await asyncio.sleep(2)
-        try:
-            current_url = self.page.url
-        except Exception:
-            current_url = ""
+        current_url = self.page.url
         print(f"🔍 点击后 URL: {current_url}")
 
         if "jumpvps" in current_url:
             print("🔄 检测到中间跳转页面 (jumpvps)")
             for _ in range(3):
-                await asyncio.sleep(1)
-                try:
-                    if self.is_game_panel_url(self.page.url):
-                        break
-                except Exception:
-                    pass
+                time.sleep(1)
+                if self.is_game_panel_url(self.page.url):
+                    break
             else:
-                await self.kick_jumpvps_redirect()
+                self.kick_jumpvps_redirect()
 
-        ok = await self.wait_for_game_panel(timeout_sec=JUMPVPS_TIMEOUT)
-        final_url = ""
-        try:
-            final_url = self.page.url
-        except Exception:
-            pass
-        print(f"🔍 最终页面URL: {final_url}")
+        ok = self.wait_for_game_panel(timeout_sec=JUMPVPS_TIMEOUT)
+        print(f"🔍 最终页面URL: {self.page.url}")
 
         if not ok:
             print("❌ 未能进入游戏管理页面，中止后续续期步骤")
             self.renewal_status = "Failed"
-            await self.take_screenshot("jumpvps_or_panel_failed")
+            self.take_screenshot("jumpvps_or_panel_failed")
             return False
 
         print("✅ 成功到达游戏管理页面")
-        await self.take_screenshot("game_page_loaded")
-        await self.get_server_time_info()
-        await self.click_upgrade_button()
+        self.take_screenshot("game_page_loaded")
+        self.get_server_time_info()
+        self.click_upgrade_button()
         return True
 
     # =================================================================
     #                       4. 登录结果处理模块
     # =================================================================
 
-    async def handle_login_result(self):
-        """处理登录结果"""
+    def handle_login_result(self):
         try:
             print("🔍 正在检查登录结果...")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(2)
+            time.sleep(3)
 
             current_url = self.page.url
             print(f"🔍 当前URL: {current_url}")
 
             if self.is_game_panel_url(current_url):
                 print("✅ 已直接进入游戏管理页面")
-                await self.take_screenshot("game_page_loaded")
-                await self.get_server_time_info()
-                await self.click_upgrade_button()
+                self.take_screenshot("game_page_loaded")
+                self.get_server_time_info()
+                self.click_upgrade_button()
                 return True
 
             if "jumpvps" in current_url:
                 print("🔄 登录后直接进入 jumpvps，继续处理跳转...")
-                await self.kick_jumpvps_redirect()
-                if await self.wait_for_game_panel():
-                    await self.take_screenshot("game_page_loaded")
-                    await self.get_server_time_info()
-                    await self.click_upgrade_button()
+                self.kick_jumpvps_redirect()
+                if self.wait_for_game_panel():
+                    self.take_screenshot("game_page_loaded")
+                    self.get_server_time_info()
+                    self.click_upgrade_button()
                     return True
                 self.renewal_status = "Failed"
-                await self.take_screenshot("jumpvps_after_login_failed")
+                self.take_screenshot("jumpvps_after_login_failed")
                 return False
 
             if self.is_login_success_url(current_url):
                 print("✅ 登录成功!已跳转到XServer GAME管理页面")
-                await asyncio.sleep(2)
+                time.sleep(2)
                 try:
-                    return await self.open_game_management()
+                    return self.open_game_management()
                 except Exception as e:
                     print(f"❌ 查找或点击ゲーム管理按钮时出错: {e}")
                     self.renewal_status = "Failed"
-                    await self.take_screenshot("game_button_error")
+                    self.take_screenshot("game_button_error")
                     return False
 
             print("❌ 登录失败!当前URL不是预期的成功页面")
-            print("   预期包含: xapanel/xmgame/index 或游戏管理页")
             print(f"   实际URL: {current_url}")
-            await self.take_screenshot("login_failed")
+            self.take_screenshot("login_failed")
             return False
 
         except Exception as e:
@@ -706,129 +537,61 @@ class XServerAutoLogin:
     #                    5A. 服务器信息获取模块
     # =================================================================
 
-    async def get_server_time_info(self):
-        """获取服务器时间信息（带导航重试）"""
+    def get_server_time_info(self):
         print("🕒 正在获取服务器时间信息...")
 
         for attempt in range(1, 4):
             try:
-                await self.safe_wait_load(timeout=15000)
-                await asyncio.sleep(1)
+                time.sleep(1)
+                body_text = self.page.html
 
-                elements = await self.page.locator(r"text=/残り\d+時間\d+分/").all()
-
-                for element in elements:
-                    element_text = await element.text_content()
-                    element_text = element_text.strip() if element_text else ""
-
-                    if (
-                        element_text
-                        and len(element_text) < 200
-                        and "残り" in element_text
-                        and "時間" in element_text
-                    ):
-                        print(f"✅ 找到时间元素: {element_text}")
-
-                        remaining_match = re.search(r"残り(\d+時間\d+分)", element_text)
-                        if remaining_match:
-                            remaining_raw = remaining_match.group(1)
-                            remaining_formatted = self.format_remaining_time(remaining_raw)
-                            print(f"⏰ 剩余时间: {remaining_formatted}")
-                            self.remaining_seconds = self.parse_remaining_seconds(
-                                remaining_formatted
-                            )
-
-                        expiry_match = re.search(
-                            r"\((\d{4}-\d{2}-\d{2}[^)]*)まで\)", element_text
-                        )
-                        if expiry_match:
-                            expiry_raw = expiry_match.group(1).strip()
-                            expiry_formatted = self.format_expiry_date(expiry_raw)
-                            print(f"📅 查找到的到期时间: {expiry_formatted}")
-                            if self.old_expiry_time is None:
-                                self.old_expiry_time = expiry_formatted
-                                print("✅ 已记录原到期时间")
-
-                        return
-
-                body_text = await self.page.locator("body").inner_text()
                 remaining_match = re.search(r"残り(\d+時間\d+分)", body_text)
                 if remaining_match:
-                    remaining_formatted = self.format_remaining_time(remaining_match.group(1))
-                    print(f"⏰ 剩余时间(body): {remaining_formatted}")
+                    remaining_formatted = remaining_match.group(1)
+                    print(f"⏰ 剩余时间: {remaining_formatted}")
                     self.remaining_seconds = self.parse_remaining_seconds(remaining_formatted)
-                    expiry_match = re.search(
-                        r"\((\d{4}-\d{2}-\d{2}[^)]*)まで\)", body_text
-                    )
+
+                    expiry_match = re.search(r"\((\d{4}-\d{2}-\d{2}[^)]*)まで\)", body_text)
                     if expiry_match and self.old_expiry_time is None:
-                        self.old_expiry_time = self.format_expiry_date(
-                            expiry_match.group(1).strip()
-                        )
-                        print(f"📅 到期时间(body): {self.old_expiry_time}")
+                        self.old_expiry_time = expiry_match.group(1).strip()
+                        print(f"📅 到期时间: {self.old_expiry_time}")
                     return
 
                 print(f"ℹ️ 第 {attempt} 次未找到时间信息，稍后重试...")
-                await asyncio.sleep(2)
+                time.sleep(2)
 
             except Exception as e:
-                msg = str(e)
                 print(f"⚠️ 获取时间信息失败(第{attempt}次): {e}")
-                if "Execution context was destroyed" in msg or "navigation" in msg.lower():
-                    await asyncio.sleep(2)
-                    continue
-                break
-
-    def format_remaining_time(self, time_str):
-        return time_str
-
-    def format_expiry_date(self, date_str):
-        return date_str
 
     # =================================================================
     #                    5B. 续期页面导航模块
     # =================================================================
 
-    async def click_upgrade_button(self):
-        """点击升级延长按钮"""
+    def click_upgrade_button(self):
         try:
             print("📄 正在查找アップグレード・期限延長按钮...")
-            await self.safe_wait_load(timeout=15000)
+            time.sleep(2)
 
-            candidates = [
-                "a:has-text('アップグレード・期限延長')",
-                "text=アップグレード・期限延長",
-                "a:has-text('期限延長')",
-                "a[href*='freeplan/extend']",
-            ]
+            upgrade_btn = (
+                self.page.ele("text:アップグレード・期限延長")
+                or self.page.ele("text:期限延長")
+                or self.page.ele('css:a[href*="freeplan/extend"]')
+            )
 
-            clicked = False
-            last_error = None
-            for upgrade_selector in candidates:
-                try:
-                    await self.page.wait_for_selector(upgrade_selector, timeout=self.wait_timeout)
-                    print(f"✅ 找到升级按钮: {upgrade_selector}")
-                    await self.page.click(upgrade_selector)
-                    clicked = True
-                    break
-                except Exception as e:
-                    last_error = e
-                    continue
+            if not upgrade_btn:
+                raise RuntimeError("未找到升级按钮")
 
-            if not clicked:
-                raise last_error or RuntimeError("未找到升级按钮")
-
-            print("✅ 已点击アップグレード・期限延長按钮")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(2)
-            await self.verify_upgrade_page()
+            print("✅ 找到升级按钮，执行点击...")
+            upgrade_btn.click()
+            time.sleep(3)
+            self.verify_upgrade_page()
 
         except Exception as e:
             print(f"❌ 点击升级按钮失败: {e}")
             self.renewal_status = "Failed"
-            await self.take_screenshot("upgrade_button_failed")
+            self.take_screenshot("upgrade_button_failed")
 
-    async def verify_upgrade_page(self):
-        """验证升级页面"""
+    def verify_upgrade_page(self):
         try:
             current_url = self.page.url
             expected_url = "https://secure.xserver.ne.jp/xmgame/game/freeplan/extend/index"
@@ -837,27 +600,22 @@ class XServerAutoLogin:
 
             if expected_url in current_url or "freeplan/extend" in current_url:
                 print("✅ 成功跳转到升级页面")
-                await self.check_extension_restriction()
+                self.check_extension_restriction()
             else:
                 print("❌ 升级页面跳转失败")
-                print(f"   预期URL: {expected_url}")
-                print(f"   实际URL: {current_url}")
                 self.renewal_status = "Failed"
 
         except Exception as e:
             print(f"❌ 验证升级页面失败: {e}")
 
-    async def check_extension_restriction(self):
-        """检查期限延长限制信息 (智能识别新旧版提示)"""
+    def check_extension_restriction(self):
         try:
             print("🔍 正在检测期限延长限制提示...")
-            await asyncio.sleep(2)
+            time.sleep(2)
 
-            body_text = await self.page.locator("body").inner_text()
+            body_text = self.page.html
 
-            match = re.search(
-                r"更新をご希望の場合は、(.+?)以降にお試しください。", body_text
-            )
+            match = re.search(r"更新をご希望の場合は、(.+?)以降にお試しください。", body_text)
 
             if match and match.group(1):
                 next_time = match.group(1).strip()
@@ -874,7 +632,7 @@ class XServerAutoLogin:
 
             else:
                 print("ℹ️ 未找到任何期限延长限制信息，说明已经开放续期，准备进行延长操作...")
-                await self.perform_extension_operation()
+                self.perform_extension_operation()
                 return False
 
         except Exception as e:
@@ -885,196 +643,130 @@ class XServerAutoLogin:
     #                    5C. 续期操作执行模块
     # =================================================================
 
-    async def perform_extension_operation(self):
-        """执行期限延长操作"""
+    def perform_extension_operation(self):
         try:
             print("📄 开始执行期限延长操作...")
-            await self.click_extension_button()
+            self.click_extension_button()
         except Exception as e:
             print(f"❌ 执行期限延长操作失败: {e}")
 
-    async def click_extension_button(self):
-        """点击期限延长按钮 (优化选择器版)"""
+    def click_extension_button(self):
         try:
             print("🔍 正在查找'期限を延長する'按钮...")
+            ext_btn = self.page.ele("text:期限を延長する")
+            if not ext_btn:
+                return False
 
-            extension_selector = "text='期限を延長する'"
-            await self.page.wait_for_selector(extension_selector, timeout=self.wait_timeout)
-            print("✅ 找到'期限を延長する'按钮")
+            print("✅ 找到'期限を延長する'按钮并点击")
+            ext_btn.click()
 
-            await self.page.click(extension_selector)
-            print("✅ 已点击'期限を延長する'按钮")
-
-            print("⏰ 等待页面跳转...")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(2)
-
-            await self.verify_extension_input_page()
+            time.sleep(3)
+            self.verify_extension_input_page()
             return True
 
         except Exception as e:
             print(f"❌ 点击期限延长按钮失败: {e}")
             return False
 
-    async def verify_extension_input_page(self):
-        """验证是否成功跳转到期限延长输入页面"""
+    def verify_extension_input_page(self):
         try:
             current_url = self.page.url
             expected_url = "https://secure.xserver.ne.jp/xmgame/game/freeplan/extend/input"
 
-            print(f"🔍 当前页面URL: {current_url}")
-
             if expected_url in current_url:
                 print("🎉 成功跳转到期限延长输入页面!")
-                await self.take_screenshot("extension_input_page")
-                await self.click_confirmation_button()
+                self.take_screenshot("extension_input_page")
+                self.click_confirmation_button()
                 return True
             else:
-                print("❌ 页面跳转失败")
-                print(f"   预期URL: {expected_url}")
-                print(f"   实际URL: {current_url}")
+                print(f"❌ 页面跳转失败, 实际URL: {current_url}")
                 return False
 
         except Exception as e:
             print(f"❌ 验证期限延长输入页面失败: {e}")
             return False
 
-    async def click_confirmation_button(self):
-        """点击確認画面に進む按钮"""
+    def click_confirmation_button(self):
         try:
             print("🔍 正在查找'確認画面に進む'按钮...")
+            conf_btn = self.page.ele('css:button[type="submit"]:contains("確認画面に進む")') or self.page.ele("text:確認画面に進む")
+            if conf_btn:
+                conf_btn.click()
+                print("✅ 已点击'確認画面に進む'按钮")
 
-            confirmation_selector = "button[type='submit']:has-text('確認画面に進む')"
-            await self.page.wait_for_selector(confirmation_selector, timeout=self.wait_timeout)
-            print("✅ 找到'確認画面に進む'按钮")
-
-            await self.page.click(confirmation_selector)
-            print("✅ 已点击'確認画面に進む'按钮")
-
-            print("⏰ 等待页面跳转...")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(2)
-
-            await self.verify_extension_conf_page()
+            time.sleep(3)
+            self.verify_extension_conf_page()
             return True
 
         except Exception as e:
             print(f"❌ 点击確認画面に進む按钮失败: {e}")
             return False
 
-    async def verify_extension_conf_page(self):
-        """验证是否成功跳转到期限延长确认页面"""
+    def verify_extension_conf_page(self):
         try:
             current_url = self.page.url
             expected_url = "https://secure.xserver.ne.jp/xmgame/game/freeplan/extend/conf"
 
-            print(f"🔍 当前页面URL: {current_url}")
-
             if expected_url in current_url:
                 print("🎉 成功跳转到期限延长确认页面!")
-                await self.take_screenshot("extension_conf_page")
-                await self.record_extension_time()
-                await self.find_final_extension_button()
+                self.take_screenshot("extension_conf_page")
+                self.record_extension_time()
+                self.find_final_extension_button()
                 return True
             else:
-                print("❌ 页面跳转失败")
-                print(f"   预期URL: {expected_url}")
-                print(f"   实际URL: {current_url}")
+                print(f"❌ 页面跳转失败, 实际URL: {current_url}")
                 return False
 
         except Exception as e:
             print(f"❌ 验证期限延长确认页面失败: {e}")
             return False
 
-    async def record_extension_time(self):
-        """记录续期后的时间信息"""
+    def record_extension_time(self):
         try:
-            print("📅 正在获取续期后的时间信息...")
-
-            time_selector = "tr:has(th:has-text('延長後の期限'))"
-            time_element = await self.page.wait_for_selector(
-                time_selector, timeout=self.wait_timeout
-            )
-            print("✅ 找到续期后时间信息")
-
-            td_element = await time_element.query_selector("td")
-            if td_element:
-                extension_time = await td_element.text_content()
-                extension_time = extension_time.strip()
+            time_ele = self.page.ele('css:tr:has(th:contains("延長後の期限")) td')
+            if time_ele:
+                extension_time = time_ele.text.strip()
                 print(f"📅 续期后的期限: {extension_time}")
                 self.new_expiry_time = extension_time
-            else:
-                print("❌ 未找到时间内容")
-
         except Exception as e:
             print(f"❌ 记录续期后时间失败: {e}")
 
-    async def find_final_extension_button(self):
-        """查找并点击最终的期限延长按钮"""
+    def find_final_extension_button(self):
         try:
-            print("🔍 正在查找最终的'期限を延長する'按钮...")
+            final_btn = self.page.ele('css:button[type="submit"]:contains("期限を延長する")') or self.page.ele("text:期限を延長する")
+            if final_btn:
+                final_btn.click()
+                print("✅ 已点击最终续期按钮")
 
-            final_button_selector = "button[type='submit']:has-text('期限を延長する')"
-            await self.page.wait_for_selector(
-                final_button_selector, timeout=self.wait_timeout
-            )
-            print("✅ 找到最终的'期限を延長する'按钮")
-
-            await self.page.click(final_button_selector)
-            print("✅ 已点击最终续期按钮")
-
-            print("⏰ 等待续期操作完成...")
-            await self.safe_wait_load(timeout=30000)
-            await asyncio.sleep(2)
-
-            await self.verify_extension_success()
+            time.sleep(3)
+            self.verify_extension_success()
             return True
 
         except Exception as e:
             print(f"❌ 执行最终期限延长操作失败: {e}")
             return False
 
-    async def verify_extension_success(self):
-        """验证续期操作是否成功"""
+    def verify_extension_success(self):
         try:
-            print("🔍 正在验证续期操作结果...")
-
             current_url = self.page.url
             expected_url = "https://secure.xserver.ne.jp/xmgame/game/freeplan/extend/do"
 
-            print(f"🔍 当前页面URL: {current_url}")
-
             url_success = expected_url in current_url
-
-            text_success = False
-            try:
-                success_text_selector = "p:has-text('期限を延長しました。')"
-                await self.page.wait_for_selector(success_text_selector, timeout=5000)
-                success_text = await self.page.query_selector(success_text_selector)
-                if success_text:
-                    text_content = await success_text.text_content()
-                    print(f"✅ 找到成功提示文字: {text_content.strip()}")
-                    text_success = True
-            except Exception:
-                print("ℹ️ 未找到成功提示文字")
+            text_success = "期限を延長しました。" in self.page.html
 
             if url_success or text_success:
                 print("🎉 续期操作成功!")
                 self.renewal_status = "Success"
-                await self.take_screenshot("extension_success")
+                self.take_screenshot("extension_success")
                 try:
-                    await self.page.screenshot(
-                        path="renewal_success_tg.png", full_page=True, timeout=15000
-                    )
+                    self.page.get_screenshot(path="renewal_success_tg.png")
                 except Exception:
-                    await self.page.screenshot(
-                        path="renewal_success_tg.png", full_page=False, timeout=10000
-                    )
+                    pass
                 return True
             else:
                 print("❌ 续期操作可能失败")
                 self.renewal_status = "Failed"
-                await self.take_screenshot("extension_failed")
+                self.take_screenshot("extension_failed")
                 return False
 
         except Exception as e:
@@ -1087,7 +779,6 @@ class XServerAutoLogin:
     # =================================================================
 
     def generate_report_notify(self):
-        """生成report-notify.md文件记录续期情况"""
         try:
             print("📝 正在生成report-notify.md文件...")
 
@@ -1100,7 +791,7 @@ class XServerAutoLogin:
 
             if self.renewal_status == "Success":
                 readme_content += "📊续期结果:✅Success<br>\n"
-                readme_content += f"🕛️旧到期时间: `{self.old_expiry_time or 'Unknown'}`<br>\n"
+                readme_content += f"矿旧到期时间: `{self.old_expiry_time or 'Unknown'}`<br>\n"
                 readme_content += f"🕡️新到期时间: `{self.new_expiry_time or 'Unknown'}`<br>\n"
             elif self.renewal_status == "Unexpired":
                 readme_content += "📊续期结果:ℹ️Unexpired<br>\n"
@@ -1116,18 +807,12 @@ class XServerAutoLogin:
                 f.write(readme_content)
 
             print("✅ report-notify.md文件生成成功")
-            print(f"📄 续期状态: {self.renewal_status}")
-            print(f"📅 原到期时间: {self.old_expiry_time or 'Unknown'}")
-            if self.new_expiry_time:
-                print(f"📅 新到期时间: {self.new_expiry_time}")
-
             self.push_to_telegram(current_time)
 
         except Exception as e:
             print(f"❌ 生成report-notify.md文件失败: {e}")
 
     def push_to_telegram(self, run_time=None):
-        """推送结果到 Telegram"""
         try:
             print("📱 正在推送结果到 Telegram...")
 
@@ -1157,51 +842,35 @@ class XServerAutoLogin:
     #                       6. 主流程控制模块
     # =================================================================
 
-    async def run(self):
-        """运行自动登录流程"""
+    def run(self):
         try:
-            print("🚀 开始 XServer GAME 自动登录流程...")
+            print("🚀 开始 XServer GAME 自动登录流程 (DrissionPage 版)...")
 
             if not self.validate_config():
                 return False
 
-            if not await self.setup_browser():
+            if not self.setup_browser():
                 return False
 
-            if not await self.navigate_to_login():
+            if not self.navigate_to_login():
                 return False
 
-            if not await self.perform_login():
+            if not self.perform_login():
                 return False
 
-            if not await self.handle_login_result():
-                print("⚠️ 登录或进入游戏管理页失败,请检查邮箱密码 / jumpvps 跳转")
+            if not self.handle_login_result():
+                print("⚠️ 登录或进入游戏管理页失败")
                 self.generate_report_notify()
                 return False
 
             print("🎉 XServer GAME 自动登录流程完成!")
-            await self.take_screenshot("login_completed")
-
-            if self.renewal_status == "Success":
-                print("🔄 续期成功，重新获取最新剩余时间...")
-                try:
-                    game_url = "https://secure.xserver.ne.jp/xmgame/game/index"
-                    await self.page.goto(game_url, wait_until="load", timeout=60000)
-                    await asyncio.sleep(3)
-                    await self.get_server_time_info()
-                    print(f"✅ 已刷新剩余时间: {self.remaining_seconds} 秒")
-                except Exception as e:
-                    print(f"⚠️ 刷新时间失败，将使用续期前的时间上报: {e}")
+            self.take_screenshot("login_completed")
 
             if self.remaining_seconds > 0:
                 print("📡 正在上报最终状态到面板...")
                 self.report_status(self.remaining_seconds)
 
             self.generate_report_notify()
-
-            print("⏰ 浏览器将在 10 秒后关闭...")
-            await asyncio.sleep(10)
-
             return True
 
         except Exception as e:
@@ -1210,62 +879,20 @@ class XServerAutoLogin:
             return False
 
         finally:
-            await self.cleanup()
+            self.cleanup()
 
 
-# =====================================================================
-#                          主程序入口
-# =====================================================================
-
-async def main():
-    """主函数"""
+def main():
     print("=" * 60)
-    print("XServer GAME 自动登录脚本 - Playwright版本")
-    print("基于 Playwright + stealth (jumpvps 修复版)")
+    print("XServer GAME 自动登录脚本 - DrissionPage 版")
     print("=" * 60)
-    print()
 
-    print("📋 当前配置:")
-    print(f"   XServer邮箱: {LOGIN_EMAIL}")
-    print(f"   XServer密码: {'*' * len(LOGIN_PASSWORD) if LOGIN_PASSWORD else 'None'}")
-    print(f"   目标网站: {TARGET_URL}")
-    print(f"   无头模式: {USE_HEADLESS}")
-    print(f"   jumpvps超时: {JUMPVPS_TIMEOUT}s")
-    if USE_PROXY and PROXY_SERVER:
-        print(f"   代理服务器: {PROXY_SERVER}")
-    else:
-        print("   代理服务器: 未使用")
-    if PANEL_URL:
-        print(f"   面板上报: {PANEL_URL} (SERVER_NAME={SERVER_NAME})")
-    else:
-        print("   面板上报: 未配置，跳过上报")
-    print()
-
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        print("📱 Telegram推送配置:")
-        print(
-            f"   Bot Token: {TELEGRAM_BOT_TOKEN[:10]}"
-            f"{'*' * (len(TELEGRAM_BOT_TOKEN) - 10) if len(TELEGRAM_BOT_TOKEN) > 10 else ''}"
-        )
-        print(f"   Chat ID: {TELEGRAM_CHAT_ID}")
-    else:
-        print("ℹ️ Telegram推送未配置(可选功能)")
-    print()
-
-    if (
-        not LOGIN_EMAIL
-        or not LOGIN_PASSWORD
-        or LOGIN_EMAIL == "your_email@example.com"
-        or LOGIN_PASSWORD == "your_password"
-    ):
+    if not LOGIN_EMAIL or not LOGIN_PASSWORD:
         print("❌ 请先设置正确的邮箱和密码!")
-        print("   可以通过环境变量 XSERVER_EMAIL 和 XSERVER_PASSWORD 设置")
         return
 
-    print("🚀 配置验证通过,自动开始登录...")
-
     auto_login = XServerAutoLogin()
-    success = await auto_login.run()
+    success = auto_login.run()
 
     if success:
         print("✅ 登录流程执行成功!")
@@ -1276,4 +903,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

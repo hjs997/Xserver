@@ -3,7 +3,7 @@ name: 🪄 XServer自动签到
 on:
   #schedule:
     #- cron: '0 0/12 * * *'  # 每 12 小时自动运行一次
-  workflow_dispatch:        # 支持手动点击触发
+  workflow_dispatch:        # 支持手动触发
 
 jobs:
   run:
@@ -18,32 +18,31 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 优化 Apt 源与安装 Xvfb 虚拟显示
+      - name: 安装官方 Google Chrome 与 Xvfb 虚拟窗口
         run: |
-          sudo sed -i 's|http://azure.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-          sudo sed -i 's|http://*.archive.ubuntu.com|http://archive.ubuntu.com|g' /etc/apt/sources.list
-          sudo apt-get update -o Acquire::Connect-Timeout=10 -o Acquire::Request-Timeout=10
-          sudo apt-get install -y xvfb
+          sudo apt-get update
+          sudo apt-get install -y wget xvfb
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 缓存依赖
+      - name: 缓存 Python 依赖
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.cache/pip
-            ~/.cache/ms-playwright
+          path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: 安装依赖与 Playwright 浏览器
+      - name: 安装 Python 依赖
         run: |
           pip install -r requirements.txt
-          python -m playwright install --with-deps chromium
 
       - name: 设置代理隧道 (Gost)
         id: gost_setup

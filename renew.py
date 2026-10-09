@@ -3,9 +3,10 @@
 """
 XServer GAME 自动登录和续期脚本 - DrissionPage 真实 Chrome 版
 
-核心特点:
-1. 基于 DrissionPage 直接驱动系统级 Chrome 浏览器，配合 Xvfb 穿透 Cloudflare Turnstile
-2. 完整保留原版业务逻辑：JumpVPS 跳转处理、多步续期导航、Telegram 推送、面板上报
+修复要点:
+1. 修复 DrissionPage 中 SOCKS5 代理参数无法直接在 set_proxy 中生效的问题
+2. 修复登录按钮 CSS 定位选择器，准确捕捉“ログインする”按钮
+3. 完整保留原版业务逻辑：JumpVPS 跳转处理、多步续期导航、Telegram 推送、面板上报
 """
 
 import asyncio
@@ -230,9 +231,10 @@ class XServerAutoLogin:
             co.set_argument("--window-size=1920,1080")
             co.set_argument("--lang=ja-JP")
 
+            # 使用 Chrome 进程命令行参数传入 SOCKS5 代理，解决 SOCKS 格式报错问题
             if USE_PROXY and PROXY_SERVER:
                 print(f"🌐 使用代理: {PROXY_SERVER}")
-                co.set_proxy(PROXY_SERVER)
+                co.set_argument(f"--proxy-server={PROXY_SERVER}")
 
             # 保持 headless=False，在 Xvfb 虚拟屏幕中显示运行以穿透 Cloudflare
             self.page = ChromiumPage(co)
@@ -301,16 +303,20 @@ class XServerAutoLogin:
 
             email_ele = self.page.ele('css:input[name="member_id"], input[name="memberid"], input[type="text"], input[type="email"]')
             if not email_ele:
-                raise RuntimeError("未找到账号输入框")
+                print("❌ 未找到账号输入框")
+                return None, None, None
             print("✅ 找到账号/邮箱输入框")
 
             password_ele = self.page.ele('css:input[name="user_password"], input[type="password"]')
             if not password_ele:
-                raise RuntimeError("未找到密码输入框")
+                print("❌ 未找到密码输入框")
+                return None, None, None
             print("✅ 找到密码输入框")
 
-            login_btn_ele = self.page.ele('css:button[type="submit"], input[type="submit"], button:contains("ログインする")')
-            print("✅ 找到登录按钮")
+            # 使用正确的文本选择方式精确匹配“ログインする”按钮
+            login_btn_ele = self.page.ele('text:ログインする') or self.page.ele('css:button[type="submit"], input[type="submit"]')
+            if login_btn_ele:
+                print("✅ 找到登录按钮")
 
             return email_ele, password_ele, login_btn_ele
 
@@ -452,7 +458,6 @@ class XServerAutoLogin:
             game_btn.click()
 
         time.sleep(3)
-        # DrissionPage 自动切到最新的活动 Tab 标签页
         self.page = self.page.latest_tab
 
         current_url = self.page.url
@@ -791,7 +796,7 @@ class XServerAutoLogin:
 
             if self.renewal_status == "Success":
                 readme_content += "📊续期结果:✅Success<br>\n"
-                readme_content += f"矿旧到期时间: `{self.old_expiry_time or 'Unknown'}`<br>\n"
+                readme_content += f"🕛️旧到期时间: `{self.old_expiry_time or 'Unknown'}`<br>\n"
                 readme_content += f"🕡️新到期时间: `{self.new_expiry_time or 'Unknown'}`<br>\n"
             elif self.renewal_status == "Unexpired":
                 readme_content += "📊续期结果:ℹ️Unexpired<br>\n"

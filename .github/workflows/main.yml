@@ -44,31 +44,16 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: 设置代理隧道 (Gost)
-        id: gost_setup
+      - name: ⚙ 设置代理 (sing-box)
+        continue-on-error: true
         env:
-          PROXY_STR: ${{ secrets.PROXY_SERVER }}
+          NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          if [ -z "$PROXY_STR" ]; then
-            echo "⚠️ 未配置 PROXY_SERVER，跳过代理隧道搭建，降级为直连模式"
-            echo "USE_LOCAL_PROXY=false" >> $GITHUB_ENV
-            exit 0
-          fi
-
-          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
-          gunzip -f gost-linux-amd64-2.11.5.gz
-          chmod +x gost-linux-amd64-2.11.5
-          nohup ./gost-linux-amd64-2.11.5 -L :1080 -F "$PROXY_STR" > gost.log 2>&1 &
-          sleep 5
-          cat gost.log || true
-          
-          echo "🧪 测试代理连通性与出站 IP:"
-          if curl -s -x socks5://127.0.0.1:1080 --max-time 10 https://api.ipify.org?format=json; then
-            echo "✅ 代理连接成功！"
-            echo "USE_LOCAL_PROXY=true" >> $GITHUB_ENV
+          if [ -n "$NODE_LINK" ]; then
+            bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+            sleep 3
           else
-            echo "❌ 代理节点报错或连通失败，自动降级为直连模式"
-            echo "USE_LOCAL_PROXY=false" >> $GITHUB_ENV
+            echo "⚠️ 未配置 NODE_LINK，使用直连模式"
           fi
 
       - name: 🎲 随机延迟（0-120秒）
@@ -83,7 +68,7 @@ jobs:
           XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PROXY_SERVER: ${{ env.USE_LOCAL_PROXY == 'true' && 'socks5://127.0.0.1:1080' || '' }}
+          PROXY_SERVER: socks5://127.0.0.1:1080
           PANEL_URL: ${{ secrets.PANEL_URL }}
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
         run: |

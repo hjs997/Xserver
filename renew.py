@@ -3,10 +3,12 @@
 """
 XServer GAME 自动登录和续期脚本 - DrissionPage 真实 Chrome 版
 
-修复要点:
-1. 修复 DrissionPage 中 SOCKS5 代理参数无法直接在 set_proxy 中生效的问题
-2. 修复登录按钮 CSS 定位选择器，准确捕捉“ログインする”按钮
-3. 完整保留原版业务逻辑：JumpVPS 跳转处理、多步续期导航、Telegram 推送、面板上报
+修复与优化要点:
+1. 采用 DrissionPage + 真实 Chrome (Xvfb) 穿透 Cloudflare Turnstile
+2. 通过 ChromiumOptions 命令行参数设置 SOCKS5 代理，消除 SOCKS 代理设置报错
+3. 优化 Turnstile 验证后的缓冲等待（time.sleep(2)），确保前端 JavaScript 完成事件绑定
+4. 修复登录按钮及各项页面元素的选择器定位
+5. 完整保留原版所有业务逻辑：JumpVPS 跳转处理、多步续期导航、Telegram 推送、面板状态上报
 """
 
 import asyncio
@@ -231,7 +233,7 @@ class XServerAutoLogin:
             co.set_argument("--window-size=1920,1080")
             co.set_argument("--lang=ja-JP")
 
-            # 使用 Chrome 进程命令行参数传入 SOCKS5 代理，解决 SOCKS 格式报错问题
+            # 使用 Chrome 进程命令行参数传入代理，完美兼容 SOCKS5 等协议
             if USE_PROXY and PROXY_SERVER:
                 print(f"🌐 使用代理: {PROXY_SERVER}")
                 co.set_argument(f"--proxy-server={PROXY_SERVER}")
@@ -352,6 +354,8 @@ class XServerAutoLogin:
                 if res and len(res) > 20:
                     token_passed = True
                     print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒自动验证通过！")
+                    # 关键增加：验证成功后多等待 2 秒，确保前端 JavaScript 完成回调绑定
+                    time.sleep(2)
                     break
                 time.sleep(1)
 

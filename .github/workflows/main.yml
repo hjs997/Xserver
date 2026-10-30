@@ -42,7 +42,9 @@ jobs:
 
       - name: 安装 Python 依赖
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install patchright requests
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
@@ -101,7 +103,7 @@ jobs:
           else
             git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
             for i in {1..5}; do
-              git pull --rebase origin main && git push origin HEAD:main && break
+              git pull --rebase origin ${{ github.ref_name }} && git push origin HEAD:${{ github.ref_name }} && break
               echo "推送冲突，第 $i 次重试中..."
               sleep 2
             done

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XServer GAME 自动登录和续期脚本 - Patchright 终极过盾版 (Xvfb 真实渲染版)
+XServer GAME 自动登录和续期脚本 - 终极过盾版（融合大厂 CF 破解逻辑）
 """
 
 import asyncio
@@ -16,22 +16,14 @@ from patchright.async_api import async_playwright
 #                          配置区域
 # =====================================================================
 
-WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "15"))
-JUMPVPS_TIMEOUT = int(os.getenv("JUMPVPS_TIMEOUT", "60"))
-
-# 代理配置 - 例如 socks5://127.0.0.1:1080
 PROXY_SERVER = os.getenv("PROXY_SERVER", "")
-
-# XServer 登录凭据
 LOGIN_EMAIL = os.getenv("XSERVER_EMAIL", "")
 LOGIN_PASSWORD = os.getenv("XSERVER_PASSWORD", "")
 TARGET_URL = "https://secure.xserver.ne.jp/xapanel/login/xmgame"
 
-# Telegram 配置
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# 面板上报配置
 PANEL_URL = os.getenv("PANEL_URL", "")
 SERVER_NAME = os.getenv("SERVER_NAME", "")
 
@@ -50,8 +42,6 @@ class TelegramNotifier:
         self.bot_token = bot_token or TELEGRAM_BOT_TOKEN
         self.chat_id = chat_id or TELEGRAM_CHAT_ID
         self.enabled = bool(self.bot_token and self.chat_id)
-        if not self.enabled:
-            print("ℹ️ Telegram 推送未启用(缺少 BOT_TOKEN 或 CHAT_ID)")
 
     def send_message(self, message, parse_mode="HTML"):
         if not self.enabled:
@@ -97,15 +87,113 @@ class TelegramNotifier:
             message += f"📊 续期结果: <b>ℹ️ 未到期</b>\n"
             message += f"🕛 到期时间: <code>{old_time}</code>\n"
             message += f"💡 提示: 剩余时间充足,无需续期\n"
-        elif status == "Failed":
-            message += f"📊 续期结果: <b>❌ 失败</b>\n"
-            message += f"🕛 到期时间: <code>{old_time}</code>\n"
-            message += f"⚠️ 请检查日志或手动处理\n"
         else:
-            message += f"📊 续期结果: <b>❓ 未知</b>\n"
+            message += f"📊 续期结果: <b>❌ 失败</b>\n"
             message += f"🕛 到期时间: <code>{old_time}</code>\n"
 
         return self.send_message(message)
+
+# =====================================================================
+#                Cloudflare Turnstile 智能过盾核心函数
+# =====================================================================
+
+async def _get_turnstile_token(page):
+    """主动轮询读取 Turnstile 验证通过后生成的响应 token"""
+    try:
+        return await page.evaluate(
+            """
+            () => {
+                try {
+                    if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+                        let t = null;
+                        try { t = window.turnstile.getResponse(); } catch (e) {}
+                        if (t && t.length > 20) return t;
+                        for (let i = 0; i < 5; i++) {
+                            try { t = window.turnstile.getResponse(String(i)); } catch (e) { t = null; }
+                            if (t && t.length > 20) return t;
+                        }
+                    }
+                } catch (e) {}
+                const inputs = document.querySelectorAll(
+                    'input[name="cf-turnstile-response"], input[name="g-recaptcha-response"]'
+                );
+                for (const el of inputs) {
+                    if (el.value && el.value.length > 20) return el.value;
+                }
+                return null;
+            }
+            """
+        )
+    except Exception:
+        return None
+
+async def solve_modal_turnstile(page, timeout=60):
+    """采用拟人化坐标偏移点击与长周期轮询破解 Turnstile"""
+    print("🛡️ 开始智能处理 Cloudflare Turnstile 验证...")
+    start_time = asyncio.get_event_loop().time()
+    last_click = 0
+    clicks = 0
+
+    while asyncio.get_event_loop().time() - start_time < timeout:
+        # 1. 检查是否已经成功获取 Token
+        token = await _get_turnstile_token(page)
+        if token:
+            print("🎉 Cloudflare Turnstile 验证通过，成功获取 Token！")
+            return True
+
+        # 2. 查找可见的 CF iframe 并进行拟人化点击
+        if asyncio.get_event_loop().time() - last_click > 5:
+            try:
+                clicked = False
+                # 尝试直接在 frame 里点 checkbox
+                for frame in page.frames:
+                    if "challenges.cloudflare.com" in (frame.url or ""):
+                        checkbox = frame.locator('input[type="checkbox"], label, .cb-lb').first
+                        if await checkbox.count() > 0:
+                            await checkbox.click(timeout=2000)
+                            print(f"🖱️ 第 {clicks + 1} 次：直接点击了复选框")
+                            clicked = True
+                            break
+
+                # 如果直接点失败，采用主页面 iframe 绝对坐标 + 拟人化鼠标滑动
+                if not clicked:
+                    frames_handles = await page.query_selector_all('iframe[src*="challenges.cloudflare.com"]')
+                    for handle in frames_handles:
+                        box = await handle.bounding_box()
+                        if box and box['width'] > 10 and box['height'] > 10:
+                            x = box['x'] + import_random_offset(20, 40)
+                            y = box['y'] + box['height'] / 2 + import_random_offset(-5, 5)
+                            
+                            # 模拟真人鼠标轨迹移动与点击
+                            await page.mouse.move(x - 40, y + import_random_offset(-10, 10))
+                            await asyncio.sleep(0.2)
+                            await page.mouse.move(x, y)
+                            await asyncio.sleep(0.1)
+                            await page.mouse.down()
+                            await asyncio.sleep(0.08)
+                            await page.mouse.up()
+                            
+                            print(f"🖱️ 第 {clicks + 1} 次：通过拟人化坐标偏移点击 (x={int(x)}, y={int(y)})")
+                            clicked = True
+                            break
+
+                if clicked:
+                    clicks += 1
+                    last_click = asyncio.get_event_loop().time()
+            except Exception as e:
+                print(f"⚠️ 点击尝试提示: {e}")
+
+        await asyncio.sleep(1)
+
+    # 最后再确认一次
+    if await _get_turnstile_token(page):
+        return True
+    print("❌ Cloudflare 验证 Token 获取超时。")
+    return False
+
+def import_random_offset(a, b):
+    import random
+    return random.uniform(a, b)
 
 # =====================================================================
 #                  XServer 自动化执行主逻辑 (Async)
@@ -141,22 +229,21 @@ class XServerAutomation:
             return
         try:
             payload = {"server_name": SERVER_NAME, "remaining_time": remaining_seconds, "status": "up"}
-            resp = requests.post(PANEL_URL, json=payload, timeout=10)
-            print(f"✅ 状态上报成功: {resp.json()}")
-        except Exception as e:
-            print(f"❌ 状态上报失败: {e}")
+            requests.post(PANEL_URL, json=payload, timeout=10)
+        except Exception:
+            pass
 
     async def run(self):
         if not self.email or not self.password:
             print("❌ 错误: 未设置 XSERVER_EMAIL 或 XSERVER_PASSWORD 环境变量!")
             return False
 
-        print("🚀 开始 XServer GAME 自动续期流程 (Patchright 终极版)...")
+        print("🚀 开始 XServer GAME 自动续期流程 (终极过盾版)...")
 
         async with async_playwright() as p:
             proxy_config = {"server": PROXY_SERVER} if PROXY_SERVER else None
 
-            # ⚠️ 关键修复：开启 headless=False，使其完美结合外层的 xvfb-run 虚拟屏幕渲染
+            # 启动真实 Chrome 配合 Xvfb 虚拟屏幕
             browser = await p.chromium.launch(
                 headless=False,
                 channel="chrome",
@@ -186,58 +273,15 @@ class XServerAutomation:
                 await page.fill('input[name="member_id"], input[name="memberid"]', self.email)
                 await page.fill('input[name="user_password"]', self.password)
 
-                # 2. 精准定位并点击 Cloudflare Turnstile 验证框
-                print("⏳ 正在精准定位并点击 Cloudflare Turnstile 验证框...")
-                try:
-                    iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-                    clicked = False
-                    for selector in ['input[type="checkbox"]', '.mark', 'label', 'text="私はロボットではありません"']:
-                        try:
-                            target = iframe.locator(selector).first
-                            if await target.count() > 0:
-                                await target.click(timeout=3000)
-                                print(f"🖱️ 成功通过选择器 [{selector}] 点击了验证框！")
-                                clicked = True
-                                break
-                        except Exception:
-                            continue
-                    
-                    if not clicked:
-                        print("🖱️ 尝试使用坐标偏移点击验证框...")
-                        frame_element = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
-                        if frame_element:
-                            box = await frame_element.bounding_box()
-                            if box:
-                                await page.mouse.click(box["x"] + 30, box["y"] + 30)
-                                print("🖱️ 已通过主页面鼠标绝对坐标点击")
-                except Exception as e:
-                    print(f"⚠️ 自动点击验证框时发生异常: {e}")
+                # 2. 智能过 Turnstile 验证
+                await solve_modal_turnstile(page, timeout=45)
 
-                # 3. 轮询等待 cf-turnstile-response 签发
-                print("⏳ 等待 Cloudflare 验证 Token 生成 (最多 30 秒)...")
-                token_passed = False
-                for i in range(30):
-                    token = await page.evaluate(
-                        '() => { const el = document.querySelector("input[name=\\"cf-turnstile-response\\"], input[name=\\"g-recaptcha-response\\"]"); return el ? el.value : ""; }'
-                    )
-                    if token and len(token) > 20:
-                        token_passed = True
-                        print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒成功签发 Token！")
-                        await asyncio.sleep(2)
-                        break
-                    await asyncio.sleep(1)
-
-                if not token_passed:
-                    print("❌ Cloudflare 验证 Token 获取超时！")
-                    await page.screenshot(path="step_02_cf_blocked.png")
-                    return False
-
-                # 4. 提交登录
+                # 3. 提交登录
                 print("🖱️ 点击登录按钮...")
                 await page.click('text="ログインする"')
                 await asyncio.sleep(5)
 
-                # 5. 处理跳转 / 进入游戏面板
+                # 4. 处理跳转 / 进入游戏面板
                 current_url = page.url
                 print(f"🔍 当前页面 URL: {current_url}")
 
@@ -267,7 +311,7 @@ class XServerAutomation:
                 print(f"✅ 成功到达游戏管理面板: {page.url}")
                 await page.screenshot(path="step_03_game_panel.png")
 
-                # 6. 获取当前服务器剩余时间和到期时间
+                # 5. 获取当前服务器剩余时间和到期时间
                 body_text = await page.content()
                 remaining_match = re.search(r"残り(\d+時間\d+分)", body_text)
                 if remaining_match:
@@ -280,7 +324,7 @@ class XServerAutomation:
                     self.old_expiry_time = expiry_match.group(1).strip()
                     print(f"📅 当前到期时间: {self.old_expiry_time}")
 
-                # 7. 点击升级/续期按钮
+                # 6. 点击升级/续期按钮
                 print("📄 正在点击升级/期限延长按钮...")
                 upgrade_btn = page.locator('text="アップグレード・期限延長", text="期限延長", a[href*="freeplan/extend"]').first
                 if await upgrade_btn.count() == 0:
@@ -289,7 +333,7 @@ class XServerAutomation:
                 await upgrade_btn.click()
                 await asyncio.sleep(3)
 
-                # 8. 检查是否在限制期内
+                # 7. 检查是否在限制期内
                 current_html = await page.content()
                 if "更新をご希望の場合は" in current_html or "残り契約時間が24時間を切るまで" in current_html:
                     print("ℹ️ 尚未到可续期时间（剩余时间充足）")
@@ -344,11 +388,9 @@ class XServerAutomation:
         try:
             beijing_time = datetime.datetime.now(timezone(timedelta(hours=8)))
             current_time = beijing_time.strftime("%Y-%m-%d %H:%M:%S")
-
             content = f"**最后运行时间**: `{current_time}`\n\n"
             content += "**运行结果**: <br>\n"
             content += "🖥️服务器:`🇯🇵Xserver(MC)`<br>\n"
-
             if self.renewal_status == "Success":
                 content += "📊续期结果:✅Success<br>\n"
                 content += f"🕛️旧到期时间: `{self.old_expiry_time or 'Unknown'}`<br>\n"
@@ -362,9 +404,8 @@ class XServerAutomation:
 
             with open("report-notify.md", "w", encoding="utf-8") as f:
                 f.write(content)
-            print("✅ report-notify.md 生成成功")
-        except Exception as e:
-            print(f"⚠️ 生成 report 失败: {e}")
+        except Exception:
+            pass
 
     def push_telegram_notifications(self):
         beijing_time = datetime.datetime.now(timezone(timedelta(hours=8)))

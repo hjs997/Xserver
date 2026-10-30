@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 XServer GAME 自动登录和续期脚本 - Patchright 终极过盾版
-修复了缩进、超时加载与 Turnstile 强力点击逻辑
 """
 
 import asyncio
@@ -20,7 +19,7 @@ from patchright.async_api import async_playwright
 WAIT_TIMEOUT = int(os.getenv("WAIT_TIMEOUT", "15"))
 JUMPVPS_TIMEOUT = int(os.getenv("JUMPVPS_TIMEOUT", "60"))
 
-# 代理配置 - 可选，例如 socks5://127.0.0.1:1080
+# 代理配置 - 例如 socks5://127.0.0.1:1080
 PROXY_SERVER = os.getenv("PROXY_SERVER", "")
 
 # XServer 登录凭据
@@ -186,26 +185,32 @@ class XServerAutomation:
                 await page.fill('input[name="member_id"], input[name="memberid"]', self.email)
                 await page.fill('input[name="user_password"]', self.password)
 
-                # 2. 寻找并点击 Cloudflare Turnstile 验证框
-                print("⏳ 寻找并点击 Cloudflare Turnstile 验证框...")
+                # 2. 精准定位并点击 Cloudflare Turnstile 验证框
+                print("⏳ 正在精准定位并点击 Cloudflare Turnstile 验证框...")
                 try:
-                    turnstile_clicked = False
-                    for frame in page.frames:
-                        if "challenges.cloudflare.com" in frame.url:
-                            print(f"🎯 锁定 Turnstile Frame: {frame.url}")
-                            checkbox = frame.locator('input[type="checkbox"], label, .cb-lb, span.mark')
-                            if await checkbox.count() > 0:
-                                await checkbox.first.click()
-                                print("🖱️ 成功点击 Turnstile 验证复选框！")
-                                turnstile_clicked = True
+                    iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+                    clicked = False
+                    for selector in ['input[type="checkbox"]', '.mark', 'label', 'text="私はロボットではありません"']:
+                        try:
+                            target = iframe.locator(selector).first
+                            if await target.count() > 0:
+                                await target.click(timeout=3000)
+                                print(f"🖱️ 成功通过选择器 [{selector}] 点击了验证框！")
+                                clicked = True
                                 break
+                        except Exception:
+                            continue
                     
-                    if not turnstile_clicked:
-                        iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-                        await iframe.locator('body').click(position={"x": 28, "y": 28})
-                        print("🖱️ 通过相对坐标点击了 Turnstile 区域")
+                    if not clicked:
+                        print("🖱️ 尝试使用坐标偏移点击验证框...")
+                        frame_element = await page.query_selector('iframe[src*="challenges.cloudflare.com"]')
+                        if frame_element:
+                            box = await frame_element.bounding_box()
+                            if box:
+                                await page.mouse.click(box["x"] + 30, box["y"] + 30)
+                                print("🖱️ 已通过主页面鼠标绝对坐标点击")
                 except Exception as e:
-                    print(f"⚠️ 自动点击验证框提示: {e}")
+                    print(f"⚠️ 自动点击验证框时发生异常: {e}")
 
                 # 3. 轮询等待 cf-turnstile-response 签发
                 print("⏳ 等待 Cloudflare 验证 Token 生成 (最多 30 秒)...")
@@ -217,7 +222,7 @@ class XServerAutomation:
                     if token and len(token) > 20:
                         token_passed = True
                         print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒成功签发 Token！")
-                        await asyncio.sleep(2)  # 等待 JS 回调绑定
+                        await asyncio.sleep(2)
                         break
                     await asyncio.sleep(1)
 

@@ -188,18 +188,47 @@ class XServerAutomation:
                 await page.fill('input[name="member_id"], input[name="memberid"]', self.email)
                 await page.fill('input[name="user_password"]', self.password)
 
-                # 2. 智能等待 Cloudflare Turnstile 自动完成验证
-                print("⏳ 检查并等待 Cloudflare Turnstile 验证 (最多 30 秒)...")
-                
-                # 尝试点一次复选框（如果被 CF 渲染出来）
-                try:
-                    iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-                    checkbox = iframe.locator('input[type="checkbox"], .mark, label')
+# 2. 寻找并点击 Cloudflare Turnstile 验证框
+        print("⏳ 寻找并点击 Cloudflare Turnstile 验证框...")
+        try:
+            turnstile_clicked = False
+            # 遍历所有 frame 寻找 Cloudflare 验证组件
+            for frame in page.frames:
+                if "challenges.cloudflare.com" in frame.url:
+                    print(f"🎯 锁定 Turnstile Frame: {frame.url}")
+                    checkbox = frame.locator('input[type="checkbox"], label, .cb-lb, span.mark')
                     if await checkbox.count() > 0:
-                        print("🖱️ 发现 Turnstile 验证组件，点击一次...")
                         await checkbox.first.click()
-                except Exception:
-                    pass
+                        print("🖱️ 成功点击 Turnstile 验证复选框！")
+                        turnstile_clicked = True
+                        break
+            
+            if not turnstile_clicked:
+                # 兜底方案：通过 frame_locator 直接定位点击坐标
+                iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+                await iframe.locator('body').click(position={"x": 28, "y": 28})
+                print("🖱️ 通过相对坐标点击了 Turnstile 区域")
+        except Exception as e:
+            print(f"⚠️ 自动点击验证框提示: {e}")
+
+        # 3. 轮询等待 cf-turnstile-response 签发
+        print("⏳ 等待 Cloudflare 验证 Token 生成 (最多 30 秒)...")
+        token_passed = False
+        for i in range(30):
+            token = await page.evaluate(
+                '() => { const el = document.querySelector("input[name=\\"cf-turnstile-response\\"], input[name=\\"g-recaptcha-response\\"]"); return el ? el.value : ""; }'
+            )
+            if token and len(token) > 20:
+                token_passed = True
+                print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒成功签发 Token！")
+                await asyncio.sleep(2)  # 等待 JS 回调绑定
+                break
+            await asyncio.sleep(1)
+
+        if not token_passed:
+            print("❌ Cloudflare 验证 Token 获取超时！")
+            await page.screenshot(path="step_02_cf_blocked.png")
+            return False
 
                 token_passed = False
                 for i in range(30):

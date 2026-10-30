@@ -180,7 +180,7 @@ class XServerAutomation:
 
             try:
                 print(f"🌐 正在访问登录页: {self.target_url}")
-                await page.goto(self.target_url, wait_until="networkidle")
+                await page.goto(self.target_url, wait_until="domcontentloaded", timeout=60000)
                 await page.screenshot(path="step_01_login_page.png")
 
                 # 1. 填写账号密码

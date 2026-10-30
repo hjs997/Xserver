@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 XServer GAME 自动登录和续期脚本 - Patchright 终极过盾版
-基于实测成功的 Patchright + 系统 Chrome 架构
+修复了缩进、超时加载与 Turnstile 强力点击逻辑
 """
 
 import asyncio
@@ -157,7 +157,6 @@ class XServerAutomation:
         async with async_playwright() as p:
             proxy_config = {"server": PROXY_SERVER} if PROXY_SERVER else None
 
-            # 启动系统 Chrome，保持无头但兼容防检测
             browser = await p.chromium.launch(
                 headless=True,
                 channel="chrome",
@@ -169,7 +168,6 @@ class XServerAutomation:
                 ]
             )
 
-            # ⚠️ 关键：不设置 locale，避免指纹冲突；设置日本时区
             context = await browser.new_context(
                 proxy=proxy_config,
                 viewport={"width": 1920, "height": 1080},
@@ -188,48 +186,29 @@ class XServerAutomation:
                 await page.fill('input[name="member_id"], input[name="memberid"]', self.email)
                 await page.fill('input[name="user_password"]', self.password)
 
-# 2. 寻找并点击 Cloudflare Turnstile 验证框
-        print("⏳ 寻找并点击 Cloudflare Turnstile 验证框...")
-        try:
-            turnstile_clicked = False
-            # 遍历所有 frame 寻找 Cloudflare 验证组件
-            for frame in page.frames:
-                if "challenges.cloudflare.com" in frame.url:
-                    print(f"🎯 锁定 Turnstile Frame: {frame.url}")
-                    checkbox = frame.locator('input[type="checkbox"], label, .cb-lb, span.mark')
-                    if await checkbox.count() > 0:
-                        await checkbox.first.click()
-                        print("🖱️ 成功点击 Turnstile 验证复选框！")
-                        turnstile_clicked = True
-                        break
-            
-            if not turnstile_clicked:
-                # 兜底方案：通过 frame_locator 直接定位点击坐标
-                iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-                await iframe.locator('body').click(position={"x": 28, "y": 28})
-                print("🖱️ 通过相对坐标点击了 Turnstile 区域")
-        except Exception as e:
-            print(f"⚠️ 自动点击验证框提示: {e}")
+                # 2. 寻找并点击 Cloudflare Turnstile 验证框
+                print("⏳ 寻找并点击 Cloudflare Turnstile 验证框...")
+                try:
+                    turnstile_clicked = False
+                    for frame in page.frames:
+                        if "challenges.cloudflare.com" in frame.url:
+                            print(f"🎯 锁定 Turnstile Frame: {frame.url}")
+                            checkbox = frame.locator('input[type="checkbox"], label, .cb-lb, span.mark')
+                            if await checkbox.count() > 0:
+                                await checkbox.first.click()
+                                print("🖱️ 成功点击 Turnstile 验证复选框！")
+                                turnstile_clicked = True
+                                break
+                    
+                    if not turnstile_clicked:
+                        iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+                        await iframe.locator('body').click(position={"x": 28, "y": 28})
+                        print("🖱️ 通过相对坐标点击了 Turnstile 区域")
+                except Exception as e:
+                    print(f"⚠️ 自动点击验证框提示: {e}")
 
-        # 3. 轮询等待 cf-turnstile-response 签发
-        print("⏳ 等待 Cloudflare 验证 Token 生成 (最多 30 秒)...")
-        token_passed = False
-        for i in range(30):
-            token = await page.evaluate(
-                '() => { const el = document.querySelector("input[name=\\"cf-turnstile-response\\"], input[name=\\"g-recaptcha-response\\"]"); return el ? el.value : ""; }'
-            )
-            if token and len(token) > 20:
-                token_passed = True
-                print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒成功签发 Token！")
-                await asyncio.sleep(2)  # 等待 JS 回调绑定
-                break
-            await asyncio.sleep(1)
-
-        if not token_passed:
-            print("❌ Cloudflare 验证 Token 获取超时！")
-            await page.screenshot(path="step_02_cf_blocked.png")
-            return False
-
+                # 3. 轮询等待 cf-turnstile-response 签发
+                print("⏳ 等待 Cloudflare 验证 Token 生成 (最多 30 秒)...")
                 token_passed = False
                 for i in range(30):
                     token = await page.evaluate(
@@ -237,22 +216,22 @@ class XServerAutomation:
                     )
                     if token and len(token) > 20:
                         token_passed = True
-                        print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒自动验证通过！")
+                        print(f"🎉 Cloudflare Turnstile 在第 {i+1} 秒成功签发 Token！")
                         await asyncio.sleep(2)  # 等待 JS 回调绑定
                         break
                     await asyncio.sleep(1)
 
                 if not token_passed:
-                    print("❌ Cloudflare 验证超时未通过，终止运行！")
+                    print("❌ Cloudflare 验证 Token 获取超时！")
                     await page.screenshot(path="step_02_cf_blocked.png")
                     return False
 
-                # 3. 提交登录
+                # 4. 提交登录
                 print("🖱️ 点击登录按钮...")
                 await page.click('text="ログインする"')
                 await asyncio.sleep(5)
 
-                # 4. 处理跳转 / 进入游戏面板
+                # 5. 处理跳转 / 进入游戏面板
                 current_url = page.url
                 print(f"🔍 当前页面 URL: {current_url}")
 
@@ -260,7 +239,6 @@ class XServerAutomation:
                     print("🔄 检测到 jumpvps 中间页，尝试自动触发跳转...")
                     for _ in range(3):
                         try:
-                            # 尝试点常见继续按钮
                             btn = page.locator('text="進む", text="続行", text="ゲーム管理"').first
                             if await btn.count() > 0:
                                 await btn.click()
@@ -270,14 +248,12 @@ class XServerAutomation:
                         if any(hint in page.url for hint in GAME_PANEL_URL_HINTS):
                             break
 
-                # 再次确认或手动寻找管理按钮
                 if not any(hint in page.url for hint in GAME_PANEL_URL_HINTS):
                     print("🔍 查找并点击'ゲーム管理'入口...")
                     game_btn = page.locator('text="ゲーム管理"').first
                     if await game_btn.count() > 0:
                         await game_btn.click()
                         await asyncio.sleep(3)
-                        # 切换到最新标签页（如果有新开Tab）
                         pages = context.pages
                         if len(pages) > 1:
                             page = pages[-1]
@@ -285,7 +261,7 @@ class XServerAutomation:
                 print(f"✅ 成功到达游戏管理面板: {page.url}")
                 await page.screenshot(path="step_03_game_panel.png")
 
-                # 5. 获取当前服务器剩余时间和到期时间
+                # 6. 获取当前服务器剩余时间和到期时间
                 body_text = await page.content()
                 remaining_match = re.search(r"残り(\d+時間\d+分)", body_text)
                 if remaining_match:
@@ -298,7 +274,7 @@ class XServerAutomation:
                     self.old_expiry_time = expiry_match.group(1).strip()
                     print(f"📅 当前到期时间: {self.old_expiry_time}")
 
-                # 6. 点击升级/续期按钮 (アップグレード・期限延長)
+                # 7. 点击升级/续期按钮
                 print("📄 正在点击升级/期限延长按钮...")
                 upgrade_btn = page.locator('text="アップグレード・期限延長", text="期限延長", a[href*="freeplan/extend"]').first
                 if await upgrade_btn.count() == 0:
@@ -307,13 +283,12 @@ class XServerAutomation:
                 await upgrade_btn.click()
                 await asyncio.sleep(3)
 
-                # 7. 检查是否在限制期内
+                # 8. 检查是否在限制期内
                 current_html = await page.content()
                 if "更新をご希望の場合は" in current_html or "残り契約時間が24時間を切るまで" in current_html:
                     print("ℹ️ 尚未到可续期时间（剩余时间充足）")
                     self.renewal_status = "Unexpired"
                 else:
-                    # 8. 执行续期操作步骤
                     print("📄 寻找'期限を延長する'并点击...")
                     ext_btn = page.locator('text="期限を延長する"').first
                     await ext_btn.click()
@@ -324,7 +299,6 @@ class XServerAutomation:
                     await conf_btn.click()
                     await asyncio.sleep(3)
 
-                    # 记录续期后时间
                     try:
                         time_cell = page.locator('tr:has-text("延長後の期限") td').first
                         if await time_cell.count() > 0:
@@ -338,7 +312,6 @@ class XServerAutomation:
                     await final_btn.click()
                     await asyncio.sleep(4)
 
-                    # 9. 验证结果
                     success_text = "期限を延長しました。" in await page.content()
                     if success_text or "extend/do" in page.url:
                         print("🎉 续期操作成功！")
@@ -348,7 +321,6 @@ class XServerAutomation:
                         print("❌ 续期结果验证未通过")
                         self.renewal_status = "Failed"
 
-                # 10. 生成报告文件并推送 Telegram
                 self.generate_report_file()
                 self.push_telegram_notifications()
                 return True

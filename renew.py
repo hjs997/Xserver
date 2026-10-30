@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XServer GAME 自动登录和续期脚本 - 终极过盾版（融合大厂 CF 破解逻辑）
+XServer GAME 自动登录和续期脚本 - 完美适配 4 小时限制版
 """
 
 import asyncio
@@ -86,7 +86,7 @@ class TelegramNotifier:
         elif status == "Unexpired":
             message += f"📊 续期结果: <b>ℹ️ 未到期</b>\n"
             message += f"🕛 到期时间: <code>{old_time}</code>\n"
-            message += f"💡 提示: 剩余时间充足,无需续期\n"
+            message += f"💡 提示: 剩余时间大于 4 小时,暂不能续期\n"
         else:
             message += f"📊 续期结果: <b>❌ 失败</b>\n"
             message += f"🕛 到期时间: <code>{old_time}</code>\n"
@@ -98,7 +98,6 @@ class TelegramNotifier:
 # =====================================================================
 
 async def _get_turnstile_token(page):
-    """主动轮询读取 Turnstile 验证通过后生成的响应 token"""
     try:
         return await page.evaluate(
             """
@@ -128,24 +127,20 @@ async def _get_turnstile_token(page):
         return None
 
 async def solve_modal_turnstile(page, timeout=60):
-    """采用拟人化坐标偏移点击与长周期轮询破解 Turnstile"""
     print("🛡️ 开始智能处理 Cloudflare Turnstile 验证...")
     start_time = asyncio.get_event_loop().time()
     last_click = 0
     clicks = 0
 
     while asyncio.get_event_loop().time() - start_time < timeout:
-        # 1. 检查是否已经成功获取 Token
         token = await _get_turnstile_token(page)
         if token:
             print("🎉 Cloudflare Turnstile 验证通过，成功获取 Token！")
             return True
 
-        # 2. 查找可见的 CF iframe 并进行拟人化点击
         if asyncio.get_event_loop().time() - last_click > 5:
             try:
                 clicked = False
-                # 尝试直接在 frame 里点 checkbox
                 for frame in page.frames:
                     if "challenges.cloudflare.com" in (frame.url or ""):
                         checkbox = frame.locator('input[type="checkbox"], label, .cb-lb').first
@@ -155,7 +150,6 @@ async def solve_modal_turnstile(page, timeout=60):
                             clicked = True
                             break
 
-                # 如果直接点失败，采用主页面 iframe 绝对坐标 + 拟人化鼠标滑动
                 if not clicked:
                     frames_handles = await page.query_selector_all('iframe[src*="challenges.cloudflare.com"]')
                     for handle in frames_handles:
@@ -164,7 +158,6 @@ async def solve_modal_turnstile(page, timeout=60):
                             x = box['x'] + import_random_offset(20, 40)
                             y = box['y'] + box['height'] / 2 + import_random_offset(-5, 5)
                             
-                            # 模拟真人鼠标轨迹移动与点击
                             await page.mouse.move(x - 40, y + import_random_offset(-10, 10))
                             await asyncio.sleep(0.2)
                             await page.mouse.move(x, y)
@@ -185,7 +178,6 @@ async def solve_modal_turnstile(page, timeout=60):
 
         await asyncio.sleep(1)
 
-    # 最后再确认一次
     if await _get_turnstile_token(page):
         return True
     print("❌ Cloudflare 验证 Token 获取超时。")
@@ -243,7 +235,6 @@ class XServerAutomation:
         async with async_playwright() as p:
             proxy_config = {"server": PROXY_SERVER} if PROXY_SERVER else None
 
-            # 启动真实 Chrome 配合 Xvfb 虚拟屏幕
             browser = await p.chromium.launch(
                 headless=False,
                 channel="chrome",
@@ -324,30 +315,35 @@ class XServerAutomation:
                     self.old_expiry_time = expiry_match.group(1).strip()
                     print(f"📅 当前到期时间: {self.old_expiry_time}")
 
-                # 6. 点击升级/续期按钮
+                # 6. 点击升级/期限延长按钮
                 print("📄 正在点击升级/期限延长按钮...")
-                upgrade_btn = page.locator('text="アップグレード・期限延長", text="期限延長", a[href*="freeplan/extend"]').first
+                upgrade_btn = page.locator('a:has-text("アップグレード・期限延長"), button:has-text("アップグレード・期限延長"), :text("アップグレード・期限延長")').first
+                if await upgrade_btn.count() == 0:
+                    upgrade_btn = page.locator('text=/アップグレード.*期限延長/').first
+                
                 if await upgrade_btn.count() == 0:
                     raise RuntimeError("未找到升级/续期按钮")
                 
                 await upgrade_btn.click()
+                print("🖱️ 成功点击按钮")
                 await asyncio.sleep(3)
 
-                # 7. 检查是否在限制期内
+                # 7. 检查是否在限制期内（完美兼容 4 小时限制提示）
                 current_html = await page.content()
-                if "更新をご希望の場合は" in current_html or "残り契約時間が24時間を切るまで" in current_html:
-                    print("ℹ️ 尚未到可续期时间（剩余时间充足）")
+                if any(keyword in current_html for keyword in ["4時間を切るまで", "更新をご希望の場合は", "残り契約時間が", "行えません"]):
+                    print("ℹ️ 尚未到可续期时间（契约剩余时间大于 4 小时）")
                     self.renewal_status = "Unexpired"
                 else:
                     print("📄 寻找'期限を延長する'并点击...")
-                    ext_btn = page.locator('text="期限を延長する"').first
+                    ext_btn = page.locator('text="期限を延長する", button:has-text("期限を延長する"), a:has-text("期限を延長する")').first
                     await ext_btn.click()
                     await asyncio.sleep(3)
 
                     print("📄 点击'確認画面に進む'...")
                     conf_btn = page.locator('button[type="submit"]:has-text("確認画面に進む"), text="確認画面に進む"').first
-                    await conf_btn.click()
-                    await asyncio.sleep(3)
+                    if await conf_btn.count() > 0:
+                        await conf_btn.click()
+                        await asyncio.sleep(3)
 
                     try:
                         time_cell = page.locator('tr:has-text("延長後の期限") td').first
@@ -359,8 +355,9 @@ class XServerAutomation:
 
                     print("📄 点击最终确认续期按钮...")
                     final_btn = page.locator('button[type="submit"]:has-text("期限を延長する"), text="期限を延長する"').first
-                    await final_btn.click()
-                    await asyncio.sleep(4)
+                    if await final_btn.count() > 0:
+                        await final_btn.click()
+                        await asyncio.sleep(4)
 
                     success_text = "期限を延長しました。" in await page.content()
                     if success_text or "extend/do" in page.url:

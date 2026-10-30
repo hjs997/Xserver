@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XServer GAME 自动登录和续期脚本 - Patchright 终极过盾版
+XServer GAME 自动登录和续期脚本 - Patchright 终极过盾版 (Xvfb 真实渲染版)
 """
 
 import asyncio
@@ -156,8 +156,9 @@ class XServerAutomation:
         async with async_playwright() as p:
             proxy_config = {"server": PROXY_SERVER} if PROXY_SERVER else None
 
+            # ⚠️ 关键修复：开启 headless=False，使其完美结合外层的 xvfb-run 虚拟屏幕渲染
             browser = await p.chromium.launch(
-                headless=True,
+                headless=False,
                 channel="chrome",
                 args=[
                     "--no-sandbox",

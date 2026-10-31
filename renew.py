@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XServer GAME 自动登录和续期脚本
+XServer GAME 自动登录和续期脚本 
 """
 
 import asyncio
@@ -230,7 +230,7 @@ class XServerAutomation:
             print("❌ 错误: 未设置 XSERVER_EMAIL 或 XSERVER_PASSWORD 环境变量!")
             return False
 
-        print("🚀 开始 XServer GAME 自动续期流程 (终极修复版)...")
+        print("🚀 开始 XServer GAME 自动续期流程 (精确匹配修复版)...")
 
         async with async_playwright() as p:
             proxy_config = {"server": PROXY_SERVER} if PROXY_SERVER else None
@@ -315,15 +315,10 @@ class XServerAutomation:
                     self.old_expiry_time = expiry_match.group(1).strip()
                     print(f"📅 当前到期时间: {self.old_expiry_time}")
 
-                # 6. 点击升级/期限延长按钮 (Step 1)
+                # 6. 点击升级/期限延长按钮 (Step 1) -> 使用精确匹配主按钮文字
                 print("📄 步骤1：正在点击主页面的'アップグレード・期限延長'按钮...")
-                upgrade_btn = page.locator('text="アップグレード・期限延長"').first
-                if await upgrade_btn.count() == 0:
-                    upgrade_btn = page.locator('a:has-text("アップグレード・期限延長"), button:has-text("アップグレード・期限延長")').first
-                
-                if await upgrade_btn.count() == 0:
-                    raise RuntimeError("未找到主页面的升级/续期按钮")
-                
+                upgrade_btn = page.get_by_text("アップグレード・期限延長", exact=True).first
+                await upgrade_btn.wait_for(state="visible", timeout=10000)
                 await upgrade_btn.click()
                 print("🖱️ 成功点击主页面按钮")
                 await asyncio.sleep(3)
@@ -334,23 +329,21 @@ class XServerAutomation:
                     print("ℹ️ 尚未到可续期时间（契约剩余时间大于 4 小时）")
                     self.renewal_status = "Unexpired"
                 else:
-                    # Step 2: 点击套餐详情页中的 '期限を延長する'
-                    print("📄 步骤2：寻找并点击'期限を延長する'按钮...")
-                    ext_btn = page.locator('text="期限を延長する", button:has-text("期限を延長する"), a:has-text("期限を延長する")').first
-                    if await ext_btn.count() > 0:
-                        await ext_btn.click()
-                        print("🖱️ 成功点击'期限を延長する'")
-                        await asyncio.sleep(3)
-                    else:
-                        raise RuntimeError("未找到套餐详情页的'期限を延長する'按钮")
+                    # Step 2: 点击套餐详情页中的 '期限を延長する'（使用 exact=True 避免被主标题干扰）
+                    print("📄 步骤2：寻找并点击精准的'期限を延長する'按钮...")
+                    ext_btn = page.get_by_text("期限を延長する", exact=True).first
+                    await ext_btn.wait_for(state="visible", timeout=10000)
+                    await ext_btn.click()
+                    print("🖱️ 成功点击'期限を延長する'")
+                    await asyncio.sleep(3)
 
                     # Step 3: 点击 '確認画面に進む'
                     print("📄 步骤3：点击'確認画面に進む'...")
-                    conf_btn = page.locator('button[type="submit"]:has-text("確認画面に進む"), text="確認画面に進む", a:has-text("確認画面に進む")').first
-                    if await conf_btn.count() > 0:
-                        await conf_btn.click()
-                        print("🖱️ 成功点击'確認画面に進む'")
-                        await asyncio.sleep(3)
+                    conf_btn = page.get_by_text("確認画面に進む", exact=True).first
+                    await conf_btn.wait_for(state="visible", timeout=10000)
+                    await conf_btn.click()
+                    print("🖱️ 成功点击'確認画面に進む'")
+                    await asyncio.sleep(3)
 
                     try:
                         time_cell = page.locator('tr:has-text("延長後の期限") td').first
@@ -363,21 +356,29 @@ class XServerAutomation:
                     # Step 4: 点击最终确认续期按钮
                     print("📄 步骤4：点击最终确认续期按钮...")
                     final_clicked = False
-                    for btn_text in ["確定する", "設定する", "実行する", "期限を延長する"]:
-                        final_btn = page.locator(f'button:has-text("{btn_text}"), text="{btn_text}", input[value*="{btn_text}"]')
-                        if await final_btn.count() > 0:
-                            await final_btn.first.click()
-                            print(f"🎉 成功点击最终确认按钮: {btn_text}")
-                            final_clicked = True
-                            await asyncio.sleep(4)
-                            break
+                    for btn_text in ["確定する", "設定する", "実行する"]:
+                        try:
+                            final_btn = page.get_by_text(btn_text, exact=True).first
+                            if await final_btn.is_visible():
+                                await final_btn.click()
+                                print(f"🎉 成功点击最终确认按钮: {btn_text}")
+                                final_clicked = True
+                                await asyncio.sleep(4)
+                                break
+                        except:
+                            continue
                     
                     if not final_clicked:
-                        print("⚠️ 未直接匹配到标准确认按钮，尝试查找页面提交按钮...")
-                        fallback_btn = page.locator('button[type="submit"], input[type="submit"]').first
-                        if await fallback_btn.count() > 0:
-                            await fallback_btn.click()
-                            await asyncio.sleep(4)
+                        # 尝试通过精确匹配
+                        try:
+                            final_btn = page.get_by_text("期限を延長する", exact=True).last
+                            if await final_btn.is_visible():
+                                await final_btn.click()
+                                print("🎉 成功点击最后的确认'期限を延長する'按钮")
+                                final_clicked = True
+                                await asyncio.sleep(4)
+                        except:
+                            pass
 
                     success_text = "期限を延長しました。" in await page.content()
                     if success_text or "extend/do" in page.url or "complete" in page.url:

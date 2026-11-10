@@ -1,3 +1,4 @@
+
 name: 🪄 XServer自动签到
 
 on:
@@ -5,9 +6,15 @@ on:
     #- cron: '0 0/12 * * *'  # 每 12 小时自动运行一次
   workflow_dispatch:        # 支持手动触发
 
+# 防止同一分支重复并发运行
+concurrency:
+  group: xserver-auto-renew-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
+
     permissions:
       actions: write
       contents: write
@@ -18,21 +25,41 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装官方 Google Chrome、Xvfb 及中日文字体
+      # 安装 Chrome，使用新版 GPG 密钥管理方式
+      - name: 🌐 安装官方 Google Chrome、Xvfb 及中日文字体
         run: |
+          set -e
+
           sudo apt-get update
-          sudo apt-get install -y wget xvfb fonts-noto-cjk
-          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get install -y wget xvfb fonts-noto-cjk gnupg
+
+          # 创建密钥目录
+          sudo install -d -m 0755 /etc/apt/keyrings
+
+          # 下载并导入 Google 官方签名密钥
+          wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
+            | gpg --dearmor \
+            | sudo tee /etc/apt/keyrings/google-chrome.gpg > /dev/null
+
+          sudo chmod 644 /etc/apt/keyrings/google-chrome.gpg
+
+          # 添加 Google Chrome 软件源
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
+
+          # 安装 Chrome
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-      - name: 设置 Python 环境
+          # 输出版本
+          google-chrome --version
+
+      - name: ⚙ 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 缓存 Python 依赖
+      - name: 📦 缓存 Python 依赖
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -40,17 +67,25 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: 安装 Python 依赖
+      - name: 🛠️ 安装 Python 依赖
         run: |
+          set -e
+
           python -m pip install --upgrade pip
           pip install patchright requests
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+
+      # sing-box 代理
       - name: ⚙ 设置代理 (sing-box)
         continue-on-error: true
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
+          set -e
+
           if [ -n "$NODE_LINK" ]; then
             bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
             sleep 3
@@ -62,9 +97,10 @@ jobs:
         run: |
           delay=$((RANDOM % 120))
           echo "Random delay: ${delay}s"
-          sleep $delay
+          sleep "$delay"
 
-      - name: 运行脚本 (使用 Xvfb 虚拟窗口渲染)
+      # 执行签到
+      - name: 🚀 运行脚本 (使用 Xvfb 虚拟窗口渲染)
         env:
           XSERVER_EMAIL: ${{ secrets.XSERVER_EMAIL }}
           XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
@@ -74,52 +110,99 @@ jobs:
           PANEL_URL: ${{ secrets.PANEL_URL }}
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
         run: |
+          set -e
+
           xvfb-run --auto-servernum python renew.py
 
+      # 无论签到是否成功，都上传截图
       - name: 📸 上传运行截图 (便于排查)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: screenshots
           path: '*.png'
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Commit time.txt to repo
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 更新 time.txt 并安全推送
+      - name: 🕒 Commit time.txt to repo
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if [ ! -f time.txt ]; then
-            echo "首次生成时间：$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-          else
-            echo "$(date +'%Y-%m-%d %H:%M:%S')" > time.txt
-          fi
+          BRANCH="${GITHUB_REF_NAME}"
+          NOW="$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
+
+          # 更新运行时间
+          echo "$NOW" > time.txt
 
           git add time.txt
 
           if git diff --cached --quiet; then
             echo "无变化，无需提交"
           else
-            git commit -m "⏱️ 更新时间文件: $(date +'%Y-%m-%d %H:%M:%S')"
-            for i in {1..5}; do
-              git pull --rebase origin ${{ github.ref_name }} && git push origin HEAD:${{ github.ref_name }} && break
-              echo "推送冲突，第 $i 次重试中..."
-              sleep 2
+            git commit -m "⏱️ 更新时间文件: $NOW"
+
+            # 最多尝试推送 5 次
+            success=0
+
+            for i in 1 2 3 4 5; do
+              echo "Push attempt $i/5"
+
+              # 获取远程最新提交
+              git fetch origin "$BRANCH"
+
+              # 基于远程最新版本进行变基
+              if ! git rebase "origin/$BRANCH"; then
+                echo "❌ Rebase 失败，可能存在文件冲突"
+                git rebase --abort || true
+                exit 1
+              fi
+
+              # 推送
+              if git push origin "HEAD:$BRANCH"; then
+                echo "✅ 推送成功"
+                success=1
+                break
+              fi
+
+              echo "⚠️ 推送失败，第 $i 次尝试"
+
+              if [ "$i" -lt 5 ]; then
+                sleep 3
+              fi
             done
+
+            if [ "$success" -ne 1 ]; then
+              echo "❌ 5 次推送均失败"
+              exit 1
+            fi
           fi
 
+      # 清理旧的工作流运行记录
       - name: 🧹 清理旧运行记录
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          runs=$(gh run list --workflow="${{ github.workflow }}" --limit=100 --json databaseId --jq '.[].databaseId')
+          set -e
+
+          runs=$(gh run list \
+            --workflow="${{ github.workflow }}" \
+            --limit=100 \
+            --json databaseId \
+            --jq '.[].databaseId')
+
           count=0
+
           for run_id in $runs; do
             count=$((count + 1))
-            if [ $count -gt 1 ]; then
+
+            # 保留最新一次运行记录
+            if [ "$count" -gt 1 ]; then
               echo "删除运行记录: $run_id"
-              gh run delete $run_id || true
+              gh run delete "$run_id" || true
             fi
           done

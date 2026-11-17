@@ -2,9 +2,9 @@
 name: 🪄 XServer自动签到
 
 on:
-  #schedule:
-    #- cron: '0 0/12 * * *'  # 每 12 小时自动运行一次
-  workflow_dispatch:        # 支持手动触发
+  # schedule:
+  #   - cron: '0 */12 * * *'
+  workflow_dispatch:
 
 # 防止同一分支重复并发运行
 concurrency:
@@ -20,45 +20,49 @@ jobs:
       contents: write
 
     steps:
-      - name: 检出仓库
+      # 1. 检出仓库
+      - name: 📥 检出仓库
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 安装 Chrome，使用新版 GPG 密钥管理方式
+      # 2. 安装 Chrome、Xvfb 和字体
       - name: 🌐 安装官方 Google Chrome、Xvfb 及中日文字体
         run: |
           set -e
 
           sudo apt-get update
-          sudo apt-get install -y wget xvfb fonts-noto-cjk gnupg
+          sudo apt-get install -y \
+            wget \
+            curl \
+            xvfb \
+            fonts-noto-cjk \
+            gnupg \
+            ca-certificates
 
-          # 创建密钥目录
           sudo install -d -m 0755 /etc/apt/keyrings
 
-          # 下载并导入 Google 官方签名密钥
           wget -qO- https://dl.google.com/linux/linux_signing_key.pub \
             | gpg --dearmor \
             | sudo tee /etc/apt/keyrings/google-chrome.gpg > /dev/null
 
           sudo chmod 644 /etc/apt/keyrings/google-chrome.gpg
 
-          # 添加 Google Chrome 软件源
           echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" \
             | sudo tee /etc/apt/sources.list.d/google-chrome.list > /dev/null
 
-          # 安装 Chrome
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
 
-          # 输出版本
           google-chrome --version
 
+      # 3. 设置 Python
       - name: ⚙ 设置 Python 环境
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # 4. 缓存 Python 依赖
       - name: 📦 缓存 Python 依赖
         uses: actions/cache@v4
         with:
@@ -67,55 +71,108 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
+      # 5. 安装 Python 依赖
       - name: 🛠️ 安装 Python 依赖
         run: |
           set -e
 
           python -m pip install --upgrade pip
-          pip install patchright requests
+          python -m pip install patchright requests
 
           if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
+            python -m pip install -r requirements.txt
           fi
 
-      # sing-box 代理
-      - name: ⚙ 设置代理 (sing-box)
-        continue-on-error: true
+      # 6. 启动 sing-box，失败自动回退直连
+      - name: ⚙ 设置代理 (sing-box，失败自动直连)
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          set -e
+          set -u
 
-          if [ -n "$NODE_LINK" ]; then
-            bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
-            sleep 3
-          else
-            echo "⚠️ 未配置 NODE_LINK，使用直连模式"
+          # 默认直连
+          echo "PROXY_SERVER=" >> "$GITHUB_ENV"
+
+          if [ -z "${NODE_LINK:-}" ]; then
+            echo "⚠️ 未配置 NODE_LINK，使用 GitHub Actions 直连"
+            exit 0
           fi
 
+          echo "🔧 正在下载 sing-box 安装脚本..."
+
+          if ! wget -qO setup_proxy.sh \
+            https://main.ssss.nyc.mn/setup_proxy.sh; then
+            echo "⚠️ 安装脚本下载失败，回退直连"
+            exit 0
+          fi
+
+          if [ ! -s setup_proxy.sh ]; then
+            echo "⚠️ 安装脚本为空，回退直连"
+            exit 0
+          fi
+
+          echo "🔧 正在执行 sing-box 安装脚本..."
+
+          if ! bash setup_proxy.sh; then
+            echo "⚠️ sing-box 安装失败，尝试回退直连"
+            exit 0
+          fi
+
+          sleep 5
+
+          echo "🔍 检查 SOCKS5 端口..."
+
+          if ! python -c "import socket; s=socket.create_connection(('127.0.0.1',1080),timeout=5); s.close()" 2>/dev/null; then
+            echo "⚠️ SOCKS5 端口未启动，回退直连"
+            exit 0
+          fi
+
+          echo "🔍 检查代理是否可以访问 XServer..."
+
+          if ! curl \
+            --socks5-hostname 127.0.0.1:1080 \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -sS -L \
+            -o /dev/null \
+            https://secure.xserver.ne.jp/xapanel/login/xmgame; then
+            echo "⚠️ 代理无法访问 XServer，回退直连"
+            exit 0
+          fi
+
+          echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> "$GITHUB_ENV"
+
+          echo "✅ sing-box 代理可用，后续使用代理"
+
+      # 7. 随机延迟
       - name: 🎲 随机延迟（0-120秒）
         run: |
           delay=$((RANDOM % 120))
-          echo "Random delay: ${delay}s"
+          echo "⏳ 随机等待 ${delay} 秒"
           sleep "$delay"
 
-      # 执行签到
+      # 8. 执行自动续期
       - name: 🚀 运行脚本 (使用 Xvfb 虚拟窗口渲染)
         env:
           XSERVER_EMAIL: ${{ secrets.XSERVER_EMAIL }}
           XSERVER_PASSWORD: ${{ secrets.XSERVER_PASSWORD }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PROXY_SERVER: socks5://127.0.0.1:1080
           PANEL_URL: ${{ secrets.PANEL_URL }}
           SERVER_NAME: ${{ secrets.SERVER_NAME }}
         run: |
           set -e
 
+          if [ -n "${PROXY_SERVER:-}" ]; then
+            echo "🌐 当前使用 sing-box SOCKS5 代理"
+          else
+            echo "🌐 当前使用 GitHub Actions 直连"
+          fi
+
           xvfb-run --auto-servernum python renew.py
 
-      # 无论签到是否成功，都上传截图
-      - name: 📸 上传运行截图 (便于排查)
+      # 9. 上传截图
+      - name: 📸 上传运行截图
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -124,7 +181,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 更新 time.txt 并安全推送
+      # 10. 更新时间文件并推送
       - name: 🕒 Commit time.txt to repo
         run: |
           set -e
@@ -135,40 +192,34 @@ jobs:
           BRANCH="${GITHUB_REF_NAME}"
           NOW="$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')"
 
-          # 更新运行时间
           echo "$NOW" > time.txt
-
           git add time.txt
 
           if git diff --cached --quiet; then
-            echo "无变化，无需提交"
+            echo "ℹ️ 无变化，无需提交"
           else
             git commit -m "⏱️ 更新时间文件: $NOW"
 
-            # 最多尝试推送 5 次
             success=0
 
             for i in 1 2 3 4 5; do
-              echo "Push attempt $i/5"
+              echo "📤 Push attempt $i/5"
 
-              # 获取远程最新提交
               git fetch origin "$BRANCH"
 
-              # 基于远程最新版本进行变基
               if ! git rebase "origin/$BRANCH"; then
-                echo "❌ Rebase 失败，可能存在文件冲突"
+                echo "❌ Rebase 失败"
                 git rebase --abort || true
                 exit 1
               fi
 
-              # 推送
               if git push origin "HEAD:$BRANCH"; then
                 echo "✅ 推送成功"
                 success=1
                 break
               fi
 
-              echo "⚠️ 推送失败，第 $i 次尝试"
+              echo "⚠️ 推送失败，第 $i 次重试"
 
               if [ "$i" -lt 5 ]; then
                 sleep 3
@@ -181,7 +232,7 @@ jobs:
             fi
           fi
 
-      # 清理旧的工作流运行记录
+      # 11. 清理旧的已完成运行记录
       - name: 🧹 清理旧运行记录
         if: always()
         env:
@@ -189,20 +240,28 @@ jobs:
         run: |
           set -e
 
+          echo "🔍 获取已完成的工作流记录..."
+
           runs=$(gh run list \
             --workflow="${{ github.workflow }}" \
+            --status completed \
             --limit=100 \
             --json databaseId \
             --jq '.[].databaseId')
 
           count=0
 
-          for run_id in $runs; do
+          while IFS= read -r run_id; do
+            [ -z "$run_id" ] && continue
+
             count=$((count + 1))
 
-            # 保留最新一次运行记录
             if [ "$count" -gt 1 ]; then
-              echo "删除运行记录: $run_id"
+              echo "🗑️ 删除旧运行记录: $run_id"
               gh run delete "$run_id" || true
+            else
+              echo "保留最新已完成记录: $run_id"
             fi
-          done
+          done <<< "$runs"
+
+          echo "✅ 历史记录清理完成"
